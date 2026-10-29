@@ -32,10 +32,10 @@ enum NavigationSection: String, CaseIterable, Identifiable {
 
     var symbolName: String {
         switch self {
-        case .apps: return "square.grid.2x2.fill"
-        case .dropZone: return "arrow.down.doc.fill"
-        case .addons: return "puzzlepiece.extension.fill"
-        case .orphans: return "sparkles.rectangle.stack.fill"
+        case .apps: return "square.grid.2x2"
+        case .dropZone: return "arrow.down.app"
+        case .addons: return "puzzlepiece.extension"
+        case .orphans: return "tray.full"
         case .history: return "clock.arrow.circlepath"
         }
     }
@@ -88,20 +88,15 @@ enum AppUsageLevel: String, Codable, CaseIterable, Sendable, Identifiable {
 
     var symbolName: String {
         switch self {
-        case .neverUsed: return "moon.zzz.fill"
-        case .dormant: return "clock.badge.exclamationmark"
+        case .neverUsed: return "minus.circle"
+        case .dormant: return "clock"
         case .rarelyUsed: return "hourglass"
-        case .frequent: return "flame.fill"
+        case .frequent: return "checkmark.circle"
         }
     }
 
     var color: Color {
-        switch self {
-        case .neverUsed: return .red
-        case .dormant: return .orange
-        case .rarelyUsed: return .yellow
-        case .frequent: return .green
-        }
+        .secondary
     }
 }
 
@@ -129,7 +124,7 @@ enum AppUsageFilter: String, CaseIterable, Identifiable {
     var pillTitle: String {
         switch self {
         case .all: return "Tất cả"
-        case .suggestedCleanup: return "Gợi ý dọn"
+        case .suggestedCleanup: return "Ít / Không dùng"
         case .neverUsed: return "Chưa mở"
         case .dormant90Days: return ">90 ngày"
         case .rarelyUsed: return "Ít dùng"
@@ -139,23 +134,12 @@ enum AppUsageFilter: String, CaseIterable, Identifiable {
 
     var symbolName: String {
         switch self {
-        case .all: return "square.stack.3d.up"
-        case .suggestedCleanup: return "sparkles"
-        case .neverUsed: return "moon.zzz.fill"
-        case .dormant90Days: return "clock.badge.exclamationmark"
+        case .all: return "square.grid.2x2"
+        case .suggestedCleanup: return "tray"
+        case .neverUsed: return "minus.circle"
+        case .dormant90Days: return "clock"
         case .rarelyUsed: return "hourglass"
-        case .frequentlyUsed: return "flame.fill"
-        }
-    }
-
-    var tintColor: Color {
-        switch self {
-        case .all: return .accentColor
-        case .suggestedCleanup: return .pink
-        case .neverUsed: return .red
-        case .dormant90Days: return .orange
-        case .rarelyUsed: return .brown
-        case .frequentlyUsed: return .green
+        case .frequentlyUsed: return "checkmark.circle"
         }
     }
 }
@@ -242,17 +226,17 @@ enum FileCategory: String, Codable, CaseIterable, Sendable, Identifiable {
 
     var symbolName: String {
         switch self {
-        case .appBundle: return "app.badge.checkmark.fill"
-        case .applicationSupport: return "externaldrive.fill.badge.person.crop"
-        case .containers: return "shippingbox.fill"
-        case .caches: return "bolt.horizontal.circle.fill"
+        case .appBundle: return "app"
+        case .applicationSupport: return "folder"
+        case .containers: return "shippingbox"
+        case .caches: return "internaldrive"
         case .preferences: return "slider.horizontal.3"
-        case .launchDaemons: return "gearshape.arrow.triangle.2.circlepath"
-        case .savedState: return "macwindow.on.rectangle"
-        case .webData: return "network"
-        case .logs: return "doc.text.magnifyingglass"
-        case .receiptsAndConfig: return "receipt.fill"
-        case .addonBundle: return "puzzlepiece.extension.fill"
+        case .launchDaemons: return "gearshape"
+        case .savedState: return "macwindow"
+        case .webData: return "globe"
+        case .logs: return "doc.text"
+        case .receiptsAndConfig: return "doc.badge.gearshape"
+        case .addonBundle: return "puzzlepiece.extension"
         }
     }
 
@@ -272,19 +256,17 @@ enum FileCategory: String, Codable, CaseIterable, Sendable, Identifiable {
         }
     }
 
-    var accentColor: Color {
+    /// Subtle tonal palette matching macOS System Settings -> Storage (follows system accent + neutral grays).
+    var storageSegmentColor: Color {
         switch self {
-        case .appBundle: return .blue
-        case .applicationSupport: return .indigo
-        case .containers: return .purple
-        case .caches: return .orange
-        case .preferences: return .teal
-        case .launchDaemons: return .red
-        case .savedState: return .cyan
-        case .webData: return .mint
-        case .logs: return .secondary
-        case .receiptsAndConfig: return .brown
-        case .addonBundle: return .pink
+        case .appBundle, .addonBundle:
+            return Color.accentColor
+        case .applicationSupport, .containers:
+            return Color.accentColor.opacity(0.62)
+        case .caches, .webData:
+            return Color.primary.opacity(0.34)
+        case .preferences, .launchDaemons, .savedState, .logs, .receiptsAndConfig:
+            return Color.primary.opacity(0.18)
         }
     }
 }

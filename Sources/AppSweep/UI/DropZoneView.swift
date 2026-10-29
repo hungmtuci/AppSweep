@@ -6,125 +6,73 @@ struct DropZoneView: View {
     @ObservedObject var viewModel: MainViewModel
 
     var body: some View {
-        VStack(spacing: 26) {
+        VStack(spacing: 20) {
             Spacer()
 
-            // Classic AppDelete Drag-and-Drop Hero Box
-            VStack(spacing: 18) {
-                ZStack {
-                    Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.accentColor.opacity(0.18), Color.red.opacity(0.14)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 96, height: 96)
+            VStack(spacing: 16) {
+                Image(systemName: viewModel.isDropZoneTargeted ? "arrow.down.circle" : "arrow.down.app")
+                    .font(.system(size: 44, weight: .ultraLight))
+                    .foregroundStyle(viewModel.isDropZoneTargeted ? Color.accentColor : Color.secondary)
 
-                    Image(systemName: viewModel.isDropZoneTargeted ? "arrow.down.circle.fill" : "trash.slash.circle.fill")
-                        .font(.system(size: 50))
-                        .foregroundStyle(viewModel.isDropZoneTargeted ? Color.accentColor : Color.red)
-                        .symbolEffect(.bounce, value: viewModel.isDropZoneTargeted)
-                }
+                VStack(spacing: 5) {
+                    Text("Kéo ứng dụng hoặc Plugin vào đây")
+                        .font(.title3.weight(.semibold))
 
-                VStack(spacing: 6) {
-                    Text("Kéo & Thả ứng dụng vào đây để gỡ triệt để")
-                        .font(.title2.weight(.bold))
-
-                    Text("Hỗ trợ .app, .prefPane, .qlgenerator, .saver, .plugin, .component, .vst3, .service")
-                        .font(.subheadline)
+                    Text("Tự động tìm toàn bộ dữ liệu liên quan trong Library, Containers, Caches & Preferences")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                 }
 
-                HStack(spacing: 12) {
-                    Button {
+                HStack(spacing: 10) {
+                    Button("Chọn từ Finder...") {
                         pickBundleFromFinder()
-                    } label: {
-                        Label("Chọn ứng dụng từ Finder...", systemImage: "folder.badge.plus")
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
                     }
                     .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
+                    .controlSize(.regular)
 
-                    Button {
+                    Button("Xem danh sách đã cài (\(viewModel.installedApps.count))") {
                         viewModel.activeSection = .apps
-                    } label: {
-                        Label("Duyệt danh sách đã cài (\(viewModel.installedApps.count))", systemImage: "square.grid.2x2")
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
                     }
                     .buttonStyle(.bordered)
-                    .controlSize(.large)
+                    .controlSize(.regular)
                 }
+                .padding(.top, 4)
             }
-            .padding(42)
-            .frame(maxWidth: 640)
+            .padding(.horizontal, 40)
+            .padding(.vertical, 44)
+            .frame(maxWidth: 540)
             .background(
-                RoundedRectangle(cornerRadius: 20)
-                    .fill(viewModel.isDropZoneTargeted ? Color.accentColor.opacity(0.09) : Color(nsColor: .controlBackgroundColor))
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(viewModel.isDropZoneTargeted ? Color.accentColor.opacity(0.06) : Color(nsColor: .controlBackgroundColor))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 20)
+                RoundedRectangle(cornerRadius: 12)
                     .strokeBorder(
-                        viewModel.isDropZoneTargeted ? Color.accentColor : Color.secondary.opacity(0.32),
-                        style: StrokeStyle(lineWidth: viewModel.isDropZoneTargeted ? 2.5 : 1.5, dash: [8, 6])
+                        viewModel.isDropZoneTargeted ? Color.accentColor : Color(nsColor: .separatorColor),
+                        style: StrokeStyle(lineWidth: viewModel.isDropZoneTargeted ? 2 : 1, dash: [6, 4])
                     )
             )
             .onDrop(of: [.fileURL], isTargeted: $viewModel.isDropZoneTargeted) { providers in
                 handleDropProviders(providers)
             }
 
-            // Feature Highlights inspired by AppDelete
-            HStack(alignment: .top, spacing: 18) {
-                featureHighlight(
-                    icon: "magnifyingglass.circle.fill",
-                    color: .blue,
-                    title: "Quét sâu 11 tầng hệ thống",
-                    desc: "Tự động dò Bundle ID, Team ID, Sandbox Containers, LaunchDaemons, Receipts & Dotfiles ẩn."
-                )
-                featureHighlight(
-                    icon: "archivebox.circle.fill",
-                    color: .orange,
-                    title: "Đóng gói Thùng rác & Sao lưu .ZIP",
-                    desc: "Gom gọn các file xóa vào 1 thư mục ngăn nắp trong Trash và tùy chọn nén .zip dự phòng."
-                )
-                featureHighlight(
-                    icon: "arrow.uturn.backward.circle.fill",
-                    color: .green,
-                    title: "Hoàn tác 1 chạm (Undo)",
-                    desc: "Đặt trả toàn bộ ứng dụng & từng file Preferences, App Support về đúng thư mục gốc ban đầu."
-                )
-            }
-            .frame(maxWidth: 780)
+            Text("Hỗ trợ .app, .prefPane, .qlgenerator, .saver, .plugin, .component, .vst3, .service · Có thể thả trực tiếp lên icon AppSweep trên Dock")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 540)
 
             Spacer()
         }
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func featureHighlight(icon: String, color: Color, title: String, desc: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Image(systemName: icon)
-                .font(.title2)
-                .foregroundStyle(color)
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-            Text(desc)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private func pickBundleFromFinder() {
         let panel = NSOpenPanel()
-        panel.title = "Chọn một hoặc nhiều ứng dụng / Plugin cần gỡ triệt để"
+        panel.title = "Chọn một hoặc nhiều ứng dụng / Plugin cần gỡ"
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true

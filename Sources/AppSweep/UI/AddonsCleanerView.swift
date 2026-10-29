@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct AddonsCleanerView: View {
@@ -20,27 +21,30 @@ struct AddonsCleanerView: View {
     private var leftAddonsListPane: some View {
         VStack(spacing: 0) {
             VStack(spacing: 8) {
-                HStack(spacing: 7) {
+                HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                     TextField("Tìm plugin, prefPane, QuickLook...", text: $viewModel.searchQuery)
                         .textFieldStyle(.plain)
+                        .font(.system(size: 12.5))
                     if !viewModel.searchQuery.isEmpty {
                         Button {
                             viewModel.searchQuery = ""
                         } label: {
                             Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 12))
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 6)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
                 )
 
                 HStack {
@@ -57,9 +61,10 @@ struct AddonsCleanerView: View {
                     } label: {
                         Label(
                             viewModel.addonFilterKind?.rawValue ?? "Tất cả loại Plugin",
-                            systemImage: "puzzlepiece.extension"
+                            systemImage: "line.3.horizontal.decrease"
                         )
-                        .font(.caption)
+                        .font(.system(size: 11.5))
+                        .lineLimit(1)
                     }
                     .controlSize(.small)
 
@@ -72,25 +77,23 @@ struct AddonsCleanerView: View {
                         .buttonStyle(.bordered)
                         .controlSize(.mini)
 
-                        Button("Bỏ chọn (\(checkedCount))") {
+                        Button("Xong") {
                             viewModel.exitMultiSelectMode()
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.mini)
                     } else {
-                        Button {
+                        Button("Chọn nhiều") {
                             viewModel.toggleMultiSelectMode()
-                        } label: {
-                            Label("Chọn nhiều", systemImage: "checklist")
-                                .font(.caption2.weight(.medium))
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.mini)
                     }
                 }
             }
-            .padding(12)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .background(Color(nsColor: .windowBackgroundColor))
 
             Divider()
 
@@ -98,64 +101,63 @@ struct AddonsCleanerView: View {
                 VStack(spacing: 8) {
                     Spacer()
                     Image(systemName: "puzzlepiece.extension")
-                        .font(.title2)
-                        .foregroundStyle(.secondary)
-                    Text("Không có tiện ích mở rộng nào")
+                        .font(.system(size: 28, weight: .light))
+                        .foregroundStyle(.tertiary)
+                    Text("Không có tiện ích mở rộng")
                         .font(.subheadline.weight(.medium))
-                    Text("Các PreferencePanes, QuickLook, Screen Savers, Audio VST/AU và Internet Plugins của bên thứ ba sẽ hiển thị tại đây.")
-                        .font(.caption)
                         .foregroundStyle(.secondary)
+                    Text("PreferencePanes, QuickLook, Screen Savers, Audio VST/AU và Internet Plugins của bên thứ ba sẽ hiển thị tại đây.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                         .multilineTextAlignment(.center)
-                        .padding(.horizontal, 18)
+                        .padding(.horizontal, 20)
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 4) {
+                    LazyVStack(spacing: 1) {
                         ForEach(viewModel.filteredAddons) { addon in
                             addonRow(addon)
                         }
                     }
-                    .padding(8)
+                    .padding(6)
                 }
             }
         }
-        .background(Color(nsColor: .underPageBackgroundColor).opacity(0.35))
+        .background(Color(nsColor: .textBackgroundColor))
     }
 
     private func addonRow(_ addon: TargetBundle) -> some View {
         let isChecked = viewModel.isTargetChecked(addon)
         let isFocusedSingle = !viewModel.isMultiSelectMode && checkedCount == 0 && (viewModel.selectedTarget?.path == addon.path)
 
-        return HStack(spacing: 9) {
-            Button {
-                viewModel.toggleCheckForTarget(addon)
-            } label: {
-                Image(systemName: isChecked ? "checkmark.square.fill" : "square")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(
-                        isChecked
-                        ? Color.accentColor
-                        : (isFocusedSingle ? Color.white.opacity(0.85) : Color.secondary.opacity(0.65))
-                    )
-                    .frame(width: 16)
-            }
-            .buttonStyle(.plain)
+        return HStack(spacing: 8) {
+            Toggle(
+                "",
+                isOn: Binding(
+                    get: { isChecked },
+                    set: { _ in viewModel.toggleCheckForTarget(addon) }
+                )
+            )
+            .toggleStyle(.checkbox)
+            .labelsHidden()
+            .controlSize(.small)
+            .frame(width: 16)
 
             Image(nsImage: viewModel.icon(for: addon.path))
                 .resizable()
-                .frame(width: 30, height: 30)
+                .frame(width: 28, height: 28)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 1.5) {
                 Text(addon.name)
-                    .font(.system(size: 13, weight: (isFocusedSingle || isChecked) ? .semibold : .medium))
+                    .font(.system(size: 12.5, weight: isFocusedSingle ? .semibold : .regular))
                     .foregroundStyle(isFocusedSingle ? .white : .primary)
                     .lineLimit(1)
 
                 Text(addon.kind.rawValue)
                     .font(.system(size: 10.5))
-                    .foregroundStyle(isFocusedSingle ? .white.opacity(0.85) : .secondary)
+                    .foregroundStyle(isFocusedSingle ? .white.opacity(0.75) : .secondary)
                     .lineLimit(1)
             }
 
@@ -163,23 +165,19 @@ struct AddonsCleanerView: View {
 
             if let size = addon.bundleSizeBytes {
                 Text(ByteFormatter.string(size))
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 11).monospacedDigit())
                     .foregroundStyle(isFocusedSingle ? .white.opacity(0.9) : .secondary)
             }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
         .background(
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: 6)
                 .fill(
                     isFocusedSingle
-                    ? Color.accentColor
-                    : (isChecked ? Color.accentColor.opacity(0.14) : Color.clear)
+                    ? Color(nsColor: .selectedContentBackgroundColor)
+                    : (isChecked ? Color.accentColor.opacity(0.11) : Color.clear)
                 )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(isChecked ? Color.accentColor.opacity(0.45) : Color.clear, lineWidth: 1)
         )
         .contentShape(Rectangle())
         .onTapGesture {
@@ -194,19 +192,21 @@ struct AddonsCleanerView: View {
         } else if let selected = viewModel.selectedTarget, selected.kind != .application {
             TargetDeepScanDetailView(viewModel: viewModel, target: selected)
         } else {
-            VStack(spacing: 12) {
-                Image(systemName: "puzzlepiece.extension.fill")
-                    .font(.system(size: 44))
+            VStack(spacing: 10) {
+                Image(systemName: "puzzlepiece.extension")
+                    .font(.system(size: 36, weight: .ultraLight))
+                    .foregroundStyle(.tertiary)
+                Text("Chưa chọn Plugin")
+                    .font(.headline)
                     .foregroundStyle(.secondary)
-                Text("Chọn một hoặc nhiều Plugin bên trái")
-                    .font(.title3.weight(.semibold))
-                Text("Tích chọn các ô vuông để gỡ nhiều tiện ích PreferencePanes, QuickLook, Screen Savers hoặc Audio VST/AU cùng lúc.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                Text("Chọn một Plugin ở danh sách bên trái để xem tệp cấu hình liên quan, hoặc tích ô vuông để gỡ hàng loạt.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
-                    .frame(maxWidth: 430)
+                    .frame(maxWidth: 380)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
         }
     }
 }

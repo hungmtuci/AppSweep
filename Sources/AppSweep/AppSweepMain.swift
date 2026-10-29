@@ -75,8 +75,8 @@ final class AppSweepDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             backing: .buffered,
             defer: false
         )
-        window.title = "AppSweep — Gỡ ứng dụng & dọn sạch dữ liệu triệt để"
-        window.subtitle = "Tham chiếu AppDelete cho macOS"
+        window.title = "AppSweep"
+        window.toolbarStyle = .unified
         window.minSize = NSSize(width: 920, height: 600)
         window.contentViewController = hostingController
         window.center()

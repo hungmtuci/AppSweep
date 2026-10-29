@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct InstalledAppsView: View {
@@ -10,53 +11,56 @@ struct InstalledAppsView: View {
     var body: some View {
         HSplitView {
             leftAppCatalogPane
-                .frame(minWidth: 315, idealWidth: 355, maxWidth: 430)
+                .frame(minWidth: 310, idealWidth: 345, maxWidth: 420)
 
             rightDetailPane
                 .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    // MARK: - Left App List
+    // MARK: - Left App Catalog Pane
 
     private var leftAppCatalogPane: some View {
         VStack(spacing: 0) {
             VStack(spacing: 8) {
-                // 1. Search Bar
-                HStack(spacing: 7) {
+                // 1. Native macOS Search Field
+                HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12))
                         .foregroundStyle(.secondary)
-                    TextField("Tìm tên ứng dụng hoặc Bundle ID...", text: $viewModel.searchQuery)
+                    TextField("Tìm ứng dụng hoặc Bundle ID", text: $viewModel.searchQuery)
                         .textFieldStyle(.plain)
+                        .font(.system(size: 12.5))
                     if !viewModel.searchQuery.isEmpty {
                         Button {
                             viewModel.searchQuery = ""
                         } label: {
                             Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 12))
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 6)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
                 )
 
-                // 2. 1-Click Usage Level Quick Pills
+                // 2. macOS Scope Bar for Usage Level (Monochrome, non-gaudy)
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 4) {
                         ForEach(AppUsageFilter.allCases) { uFilter in
-                            usageFilterPill(uFilter)
+                            usageScopeTab(uFilter)
                         }
                     }
                     .padding(.vertical, 1)
                 }
 
-                // 3. Flat Filter & Sort Menus (no nested submenus!)
+                // 3. Filter & Sort Menus
                 HStack(spacing: 6) {
                     Menu {
                         Section("Mức độ sử dụng") {
@@ -91,8 +95,8 @@ struct InstalledAppsView: View {
                             }
                         }
                     } label: {
-                        Label(activeFilterMenuLabel, systemImage: "line.3.horizontal.decrease.circle")
-                            .font(.caption)
+                        Label(activeFilterMenuLabel, systemImage: "line.3.horizontal.decrease")
+                            .font(.system(size: 11.5))
                             .lineLimit(1)
                     }
                     .controlSize(.small)
@@ -112,43 +116,39 @@ struct InstalledAppsView: View {
                         }
                     } label: {
                         Label(viewModel.sortOrder.rawValue, systemImage: "arrow.up.arrow.down")
-                            .font(.caption)
+                            .font(.system(size: 11.5))
                             .lineLimit(1)
                     }
                     .controlSize(.small)
 
-                    Spacer()
+                    Spacer(minLength: 2)
 
                     Button {
                         viewModel.reloadAllCatalogs()
                     } label: {
                         Image(systemName: "arrow.clockwise")
-                            .font(.caption)
+                            .font(.system(size: 11.5))
                     }
                     .buttonStyle(.borderless)
-                    .help("Làm mới danh sách ứng dụng & thống kê sử dụng")
+                    .help("Làm mới danh sách ứng dụng (⌘R)")
                 }
 
-                // 4. Count + Multi-Selection Control Strip
+                // 4. Summary & Multi-Selection Strip
                 HStack(spacing: 6) {
                     if viewModel.isMultiSelectMode || checkedCount > 0 {
-                        HStack(spacing: 4) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .foregroundStyle(Color.accentColor)
-                            Text("Đã chọn \(checkedCount)")
-                                .fontWeight(.semibold)
-                        }
-                        .font(.caption2)
+                        Text("Đã chọn \(checkedCount) ứng dụng")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.primary)
 
                         Spacer()
 
-                        Button("Chọn hết (\(viewModel.filteredApps.filter { !$0.isSystemProtected }.count))") {
+                        Button("Chọn hết") {
                             viewModel.selectAllVisibleTargets(viewModel.filteredApps)
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.mini)
 
-                        Button("Bỏ chọn") {
+                        Button("Xong") {
                             viewModel.exitMultiSelectMode()
                         }
                         .buttonStyle(.bordered)
@@ -156,9 +156,9 @@ struct InstalledAppsView: View {
                     } else {
                         let totalBytes = viewModel.filteredAppsTotalBytes
                         Text(totalBytes > 0
-                             ? "\(viewModel.filteredApps.count) ứng dụng • \(ByteFormatter.string(totalBytes))"
+                             ? "\(viewModel.filteredApps.count) ứng dụng · \(ByteFormatter.string(totalBytes))"
                              : "\(viewModel.filteredApps.count) ứng dụng")
-                            .font(.caption2)
+                            .font(.system(size: 11).monospacedDigit())
                             .foregroundStyle(.secondary)
 
                         if viewModel.isCalculatingAppSizes {
@@ -168,28 +168,27 @@ struct InstalledAppsView: View {
 
                         Spacer()
 
-                        Button {
+                        Button("Chọn nhiều") {
                             viewModel.toggleMultiSelectMode()
-                        } label: {
-                            Label("Chọn nhiều", systemImage: "checklist")
-                                .font(.caption2.weight(.medium))
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.mini)
-                        .help("Tích chọn nhiều ứng dụng cùng lúc (hoặc giữ phím ⌘ / ⇧ khi bấm vào dòng)")
+                        .help("Chọn nhiều ứng dụng cùng lúc (hoặc giữ phím ⌘ / ⇧ khi nhấp vào dòng)")
                     }
                 }
             }
-            .padding(12)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .background(Color(nsColor: .windowBackgroundColor))
 
             Divider()
 
             if viewModel.isLoadingCatalog {
-                VStack(spacing: 10) {
+                VStack(spacing: 8) {
                     Spacer()
                     ProgressView()
-                    Text("Đang quét ứng dụng & lịch sử sử dụng...")
+                        .controlSize(.regular)
+                    Text("Đang tải danh sách ứng dụng...")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -199,12 +198,13 @@ struct InstalledAppsView: View {
                 VStack(spacing: 8) {
                     Spacer()
                     Image(systemName: viewModel.usageFilter.symbolName)
-                        .font(.title2)
-                        .foregroundStyle(.secondary)
-                    Text("Không có ứng dụng nào ở nhóm này")
+                        .font(.system(size: 28, weight: .light))
+                        .foregroundStyle(.tertiary)
+                    Text("Không có ứng dụng phù hợp")
                         .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.secondary)
                     if viewModel.usageFilter != .all || viewModel.filterScope != .all || !viewModel.searchQuery.isEmpty {
-                        Button("Đặt lại bộ lọc về Tất cả") {
+                        Button("Xóa bộ lọc") {
                             viewModel.usageFilter = .all
                             viewModel.filterScope = .all
                             viewModel.searchQuery = ""
@@ -217,21 +217,21 @@ struct InstalledAppsView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 4) {
+                    LazyVStack(spacing: 1) {
                         ForEach(viewModel.filteredApps) { app in
                             appRow(app)
                         }
                     }
-                    .padding(8)
+                    .padding(6)
                 }
             }
         }
-        .background(Color(nsColor: .underPageBackgroundColor).opacity(0.35))
+        .background(Color(nsColor: .textBackgroundColor))
     }
 
     private var activeFilterMenuLabel: String {
         if viewModel.usageFilter != .all && viewModel.filterScope != .all {
-            return "\(viewModel.usageFilter.pillTitle) • \(viewModel.filterScope.rawValue)"
+            return "\(viewModel.usageFilter.pillTitle) · \(viewModel.filterScope.rawValue)"
         }
         if viewModel.usageFilter != .all {
             return viewModel.usageFilter.pillTitle
@@ -239,29 +239,33 @@ struct InstalledAppsView: View {
         return viewModel.filterScope.rawValue
     }
 
-    private func usageFilterPill(_ uFilter: AppUsageFilter) -> some View {
+    private func usageScopeTab(_ uFilter: AppUsageFilter) -> some View {
         let isActive = (viewModel.usageFilter == uFilter)
         let count = viewModel.countForUsageFilter(uFilter)
 
         return Button {
             viewModel.usageFilter = uFilter
-            // Auto-switch to "Ít dùng / Lâu nhất chưa mở" when user picks cleanup/unused filters if still on default A->Z
             if (uFilter == .suggestedCleanup || uFilter == .dormant90Days || uFilter == .rarelyUsed) && viewModel.sortOrder == .nameAsc {
                 viewModel.sortOrder = .leastUsedFirst
             }
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: uFilter.symbolName)
-                    .font(.system(size: 9.5, weight: .semibold))
-                Text("\(uFilter.pillTitle) \(count)")
-                    .font(.system(size: 11, weight: isActive ? .semibold : .medium))
+                Text(uFilter.pillTitle)
+                    .font(.system(size: 11, weight: isActive ? .semibold : .regular))
+                Text("\(count)")
+                    .font(.system(size: 10.5).monospacedDigit())
+                    .foregroundStyle(isActive ? Color.primary.opacity(0.75) : Color(nsColor: .tertiaryLabelColor))
             }
-            .foregroundStyle(isActive ? Color.white : Color.primary.opacity(0.82))
+            .foregroundStyle(isActive ? Color.primary : Color.secondary)
             .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .padding(.vertical, 3.5)
             .background(
-                Capsule()
-                    .fill(isActive ? uFilter.tintColor : Color.secondary.opacity(0.12))
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(isActive ? Color.primary.opacity(0.09) : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(isActive ? Color(nsColor: .separatorColor) : Color.clear, lineWidth: 0.75)
             )
         }
         .buttonStyle(.plain)
@@ -272,107 +276,83 @@ struct InstalledAppsView: View {
         let isChecked = viewModel.isTargetChecked(app)
         let isFocusedSingle = !viewModel.isMultiSelectMode && checkedCount == 0 && (viewModel.selectedTarget?.path == app.path)
         let running = viewModel.isRunning(app)
-        let level = app.usageLevel(isRunning: running)
         let usageText = app.shortUsageSummary(isRunning: running)
 
-        return HStack(spacing: 9) {
+        return HStack(spacing: 8) {
             if app.isSystemProtected {
-                Image(systemName: "lock.fill")
-                    .font(.system(size: 11))
-                    .foregroundStyle(isFocusedSingle ? .white.opacity(0.75) : .secondary.opacity(0.5))
+                Image(systemName: "lock")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(isFocusedSingle ? Color.white.opacity(0.7) : Color(nsColor: .tertiaryLabelColor))
                     .frame(width: 16)
                     .help("Ứng dụng được bảo vệ")
             } else {
-                Button {
-                    viewModel.toggleCheckForTarget(app)
-                } label: {
-                    Image(systemName: isChecked ? "checkmark.square.fill" : "square")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(
-                            isChecked
-                            ? Color.accentColor
-                            : (isFocusedSingle ? Color.white.opacity(0.85) : Color.secondary.opacity(0.65))
-                        )
-                        .frame(width: 16)
-                }
-                .buttonStyle(.plain)
-                .help("Tích để đưa \(app.name) vào danh sách xóa hàng loạt")
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { isChecked },
+                        set: { _ in viewModel.toggleCheckForTarget(app) }
+                    )
+                )
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(width: 16)
             }
 
-            ZStack(alignment: .bottomTrailing) {
-                Image(nsImage: viewModel.icon(for: app.path))
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 34, height: 34)
+            Image(nsImage: viewModel.icon(for: app.path))
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 30, height: 30)
 
-                if running {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 8, height: 8)
-                        .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.5))
+            VStack(alignment: .leading, spacing: 1.5) {
+                HStack(spacing: 5) {
+                    Text(app.name)
+                        .font(.system(size: 12.5, weight: isFocusedSingle ? .semibold : .regular))
+                        .foregroundStyle(isFocusedSingle ? .white : .primary)
+                        .lineLimit(1)
+
+                    if running {
+                        Circle()
+                            .fill(isFocusedSingle ? Color.white.opacity(0.85) : Color.secondary.opacity(0.55))
+                            .frame(width: 5, height: 5)
+                            .help("Đang mở")
+                    }
                 }
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(app.name)
-                    .font(.system(size: 13, weight: (isFocusedSingle || isChecked) ? .semibold : .medium))
-                    .foregroundStyle(isFocusedSingle ? .white : .primary)
-                    .lineLimit(1)
 
                 Text(app.bundleIdentifier.isEmpty ? app.displayPath : app.bundleIdentifier)
                     .font(.system(size: 10.5))
-                    .foregroundStyle(isFocusedSingle ? .white.opacity(0.8) : .secondary)
+                    .foregroundStyle(isFocusedSingle ? .white.opacity(0.75) : .secondary)
                     .lineLimit(1)
             }
 
             Spacer(minLength: 4)
 
-            VStack(alignment: .trailing, spacing: 2) {
+            VStack(alignment: .trailing, spacing: 1.5) {
                 if let size = app.bundleSizeBytes {
                     Text(ByteFormatter.string(size))
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundStyle(isFocusedSingle ? .white.opacity(0.95) : .primary.opacity(0.85))
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(isFocusedSingle ? .white.opacity(0.92) : .secondary)
                 }
 
                 Text(usageText)
-                    .font(.system(size: 9.5, weight: (level == .neverUsed || level == .dormant) ? .semibold : .regular))
-                    .foregroundStyle(usageLabelColor(level: level, isFocusedSingle: isFocusedSingle))
+                    .font(.system(size: 10))
+                    .foregroundStyle(isFocusedSingle ? Color.white.opacity(0.72) : Color(nsColor: .tertiaryLabelColor))
                     .lineLimit(1)
             }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
         .background(
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: 6)
                 .fill(
                     isFocusedSingle
-                    ? Color.accentColor
-                    : (isChecked ? Color.accentColor.opacity(0.14) : Color.clear)
+                    ? Color(nsColor: .selectedContentBackgroundColor)
+                    : (isChecked ? Color.accentColor.opacity(0.11) : Color.clear)
                 )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(isChecked ? Color.accentColor.opacity(0.45) : Color.clear, lineWidth: 1)
         )
         .contentShape(Rectangle())
         .onTapGesture {
             viewModel.handleTargetRowClick(app, in: viewModel.filteredApps)
-        }
-    }
-
-    private func usageLabelColor(level: AppUsageLevel, isFocusedSingle: Bool) -> Color {
-        if isFocusedSingle {
-            return .white.opacity(0.88)
-        }
-        switch level {
-        case .neverUsed:
-            return .red.opacity(0.88)
-        case .dormant:
-            return .orange
-        case .rarelyUsed:
-            return .secondary
-        case .frequent:
-            return .green.opacity(0.85)
         }
     }
 
@@ -385,19 +365,21 @@ struct InstalledAppsView: View {
         } else if let selected = viewModel.selectedTarget, selected.kind == .application {
             TargetDeepScanDetailView(viewModel: viewModel, target: selected)
         } else {
-            VStack(spacing: 14) {
-                Image(systemName: "app.dashed")
-                    .font(.system(size: 48))
+            VStack(spacing: 10) {
+                Image(systemName: "macwindow")
+                    .font(.system(size: 36, weight: .ultraLight))
+                    .foregroundStyle(.tertiary)
+                Text("Chưa chọn ứng dụng")
+                    .font(.headline)
                     .foregroundStyle(.secondary)
-                Text("Chọn một hoặc nhiều ứng dụng ở cột bên trái")
-                    .font(.title3.weight(.semibold))
-                Text("Dùng các thẻ lọc Mức độ sử dụng (Gợi ý dọn, Chưa mở, >90 ngày) ở trên để nhanh chóng tìm ứng dụng không còn dùng tới.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                Text("Chọn một ứng dụng ở danh sách bên trái để xem chi tiết dung lượng, hoặc tích ô vuông để gỡ nhiều ứng dụng cùng lúc.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
                     .multilineTextAlignment(.center)
-                    .frame(maxWidth: 430)
+                    .frame(maxWidth: 380)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
         }
     }
 }

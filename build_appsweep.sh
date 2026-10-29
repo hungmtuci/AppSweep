@@ -7,7 +7,7 @@ cd "$PROJECT_DIR"
 
 APP_NAME="AppSweep"
 BUNDLE_ID="com.hunglx.AppSweep"
-VERSION="${APPSWEEP_VERSION:-1.2.1}"
+VERSION="${APPSWEEP_VERSION:-1.3.0}"
 APP_BUNDLE="$PROJECT_DIR/$APP_NAME.app"
 ROOT_APP_BUNDLE="$ROOT_WORKSPACE_DIR/$APP_NAME.app"
 DIST_DIR="$PROJECT_DIR/dist"
@@ -65,14 +65,18 @@ for (px, name) in sizes {
 
     let path = NSBezierPath(roundedRect: bgRect, xRadius: radius, yRadius: radius)
     let gradient = NSGradient(colors: [
-        NSColor(calibratedRed: 0.94, green: 0.20, blue: 0.30, alpha: 1.0),
-        NSColor(calibratedRed: 0.98, green: 0.48, blue: 0.16, alpha: 1.0)
+        NSColor(calibratedRed: 0.24, green: 0.27, blue: 0.33, alpha: 1.0),
+        NSColor(calibratedRed: 0.14, green: 0.16, blue: 0.20, alpha: 1.0)
     ])!
-    gradient.draw(in: path, angle: -45)
+    gradient.draw(in: path, angle: -90)
 
-    if let symbol = NSImage(systemSymbolName: "trash.slash.fill", accessibilityDescription: nil) {
-        let config = NSImage.SymbolConfiguration(pointSize: CGFloat(px) * 0.43, weight: .bold)
-            .applying(.init(paletteColors: [.white]))
+    NSColor(calibratedWhite: 1.0, alpha: 0.14).setStroke()
+    path.lineWidth = max(1.0, CGFloat(px) * 0.012)
+    path.stroke()
+
+    if let symbol = NSImage(systemSymbolName: "trash", accessibilityDescription: nil) {
+        let config = NSImage.SymbolConfiguration(pointSize: CGFloat(px) * 0.42, weight: .regular)
+            .applying(.init(paletteColors: [NSColor(calibratedWhite: 0.95, alpha: 1.0)]))
         if let configured = symbol.withSymbolConfiguration(config) {
             let symSize = configured.size
             let drawRect = NSRect(

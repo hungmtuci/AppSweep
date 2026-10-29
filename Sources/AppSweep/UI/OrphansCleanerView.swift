@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct OrphansCleanerView: View {
@@ -5,17 +6,17 @@ struct OrphansCleanerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            topBanner
+            topHeaderBar
             Divider()
 
             if viewModel.isScanningOrphans {
-                VStack(spacing: 14) {
+                VStack(spacing: 10) {
                     Spacer()
                     ProgressView()
-                        .controlSize(.large)
-                    Text("Đang rà soát file rác mồ côi trên toàn bộ thư mục Library...")
-                        .font(.headline)
-                    Text("Đối chiếu LaunchServices, Bundle ID ứng dụng đang cài và các LaunchAgents gãy đường dẫn")
+                        .controlSize(.regular)
+                    Text("Đang rà soát dữ liệu mồ côi trong Library...")
+                        .font(.subheadline.weight(.medium))
+                    Text("Đối chiếu LaunchServices, Bundle ID ứng dụng hiện có và các LaunchAgents gãy đường dẫn")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -29,8 +30,9 @@ struct OrphansCleanerView: View {
                 bottomCleanFooter
             }
         }
+        .background(Color(nsColor: .windowBackgroundColor))
         .confirmationDialog(
-            "Xác nhận dọn \(viewModel.selectedOrphansCount) file rác mồ côi?",
+            "Dọn \(viewModel.selectedOrphansCount) mục rác mồ côi?",
             isPresented: $viewModel.showOrphanConfirmation,
             titleVisibility: .visible
         ) {
@@ -40,24 +42,20 @@ struct OrphansCleanerView: View {
             ) {
                 viewModel.executeOrphanCleanup()
             }
-            Button("Hủy bỏ", role: .cancel) {}
+            Button("Hủy", role: .cancel) {}
         } message: {
             Text(viewModel.removalMode == .moveToTrash
-                 ? "Tất cả mục đã chọn sẽ được chuyển gọn vào Thùng rác và có thể Hoàn tác trong tab Lịch sử."
-                 : "Cảnh báo: File xóa vĩnh viễn sẽ không thể khôi phục.")
+                 ? "Các mục đã chọn sẽ chuyển vào Thùng rác và có thể khôi phục trong mục Lịch sử & Hoàn tác."
+                 : "Thao tác xóa vĩnh viễn không thể khôi phục.")
         }
     }
 
-    private var topBanner: some View {
+    private var topHeaderBar: some View {
         HStack(spacing: 14) {
-            Image(systemName: "sparkles.rectangle.stack.fill")
-                .font(.system(size: 30))
-                .foregroundStyle(.purple)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Dọn file rác mồ côi (Orphans Scanner)")
-                    .font(.title3.weight(.bold))
-                Text("Tìm dữ liệu Caches, Containers, Saved State, Preferences và LaunchAgents sót lại từ những ứng dụng bạn từng kéo thẳng vào Trash trước đây.")
+            VStack(alignment: .leading, spacing: 2) {
+                Text("File rác mồ côi")
+                    .font(.headline)
+                Text("Tìm Caches, Containers, Preferences và LaunchAgents còn sót lại từ các ứng dụng đã xóa thủ công trước đây.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -68,41 +66,39 @@ struct OrphansCleanerView: View {
                 viewModel.scanOrphansNow()
             } label: {
                 Label(
-                    viewModel.orphans.isEmpty ? "Bắt đầu quét hệ thống" : "Quét lại",
-                    systemImage: "magnifyingglass"
+                    viewModel.orphans.isEmpty ? "Quét hệ thống" : "Quét lại",
+                    systemImage: "arrow.clockwise"
                 )
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
             .disabled(viewModel.isScanningOrphans)
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 16)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
+        .padding(.horizontal, 20)
+        .padding(.vertical, 13)
     }
 
     private var emptyOrReadyState: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 10) {
             Spacer()
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 52))
-                .foregroundStyle(.green)
-            Text("Nhấn 'Bắt đầu quét hệ thống' hoặc hệ thống của bạn đang rất sạch!")
+            Image(systemName: "tray")
+                .font(.system(size: 38, weight: .ultraLight))
+                .foregroundStyle(.tertiary)
+            Text("Chưa có mục rác mồ côi nào được liệt kê")
                 .font(.headline)
-            Text("AppSweep chỉ liệt kê các mục có Bundle ID hoặc đường dẫn tiến trình chắc chắn không còn thuộc về bất kỳ ứng dụng nào trên máy.")
-                .font(.caption)
                 .foregroundStyle(.secondary)
+            Text("Nhấn 'Quét hệ thống' để kiểm tra các thư mục dữ liệu không còn thuộc về bất kỳ ứng dụng nào trên máy.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 460)
+                .frame(maxWidth: 420)
 
-            Button {
+            Button("Quét hệ thống") {
                 viewModel.scanOrphansNow()
-            } label: {
-                Label("Quét tìm file mồ côi ngay", systemImage: "sparkle.magnifyingglass")
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
             }
             .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .controlSize(.regular)
+            .padding(.top, 4)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -110,18 +106,20 @@ struct OrphansCleanerView: View {
 
     private var orphanListContent: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12))
                         .foregroundStyle(.secondary)
-                    TextField("Lọc theo tên file hoặc Bundle ID...", text: $viewModel.orphanSearchQuery)
+                    TextField("Lọc theo tên hoặc Bundle ID", text: $viewModel.orphanSearchQuery)
                         .textFieldStyle(.plain)
+                        .font(.system(size: 12))
                 }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .frame(width: 280)
-                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
-                .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.primary.opacity(0.1)))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4.5)
+                .frame(width: 250)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
 
                 Button("Chọn tất cả") {
                     viewModel.setAllOrphansSelection(true)
@@ -129,7 +127,7 @@ struct OrphansCleanerView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
-                Button("Bỏ chọn tất cả") {
+                Button("Bỏ chọn") {
                     viewModel.setAllOrphansSelection(false)
                 }
                 .buttonStyle(.bordered)
@@ -137,64 +135,73 @@ struct OrphansCleanerView: View {
 
                 Spacer()
 
-                Text("Phát hiện \(viewModel.orphans.count) mục mồ côi")
-                    .font(.caption.weight(.medium))
+                Text("\(viewModel.filteredOrphans.count) mục")
+                    .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 20)
-            .padding(.vertical, 10)
+            .padding(.vertical, 9)
 
             Divider()
 
             ScrollView {
-                LazyVStack(spacing: 6) {
-                    ForEach(viewModel.filteredOrphans) { item in
+                VStack(spacing: 0) {
+                    ForEach(Array(viewModel.filteredOrphans.enumerated()), id: \.element.id) { idx, item in
                         orphanRow(item)
+                        if idx < viewModel.filteredOrphans.count - 1 {
+                            Divider()
+                                .padding(.leading, 40)
+                        }
                     }
                 }
-                .padding(16)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                )
+                .padding(20)
             }
         }
     }
 
     private func orphanRow(_ item: OrphanItem) -> some View {
-        HStack(spacing: 12) {
-            Button {
-                viewModel.toggleOrphanSelection(item.id)
-            } label: {
-                Image(systemName: item.isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(item.isSelected ? Color.accentColor : Color.secondary)
-                    .font(.system(size: 16))
-            }
-            .buttonStyle(.plain)
+        HStack(spacing: 10) {
+            Toggle(
+                "",
+                isOn: Binding(
+                    get: { item.isSelected },
+                    set: { _ in viewModel.toggleOrphanSelection(item.id) }
+                )
+            )
+            .toggleStyle(.checkbox)
+            .labelsHidden()
+            .controlSize(.small)
 
             Image(nsImage: viewModel.icon(for: item.path))
                 .resizable()
-                .frame(width: 28, height: 28)
+                .frame(width: 22, height: 22)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 1.5) {
                 HStack(spacing: 6) {
                     Text(item.name)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(item.isSelected ? .primary : .secondary)
                         .lineLimit(1)
 
-                    Text(item.category.shortBadge)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(item.category.accentColor)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
-                        .background(item.category.accentColor.opacity(0.13), in: Capsule())
+                    Text("· \(item.category.shortBadge)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
 
                     if item.requiresAdmin {
-                        Label("Admin", systemImage: "lock.fill")
+                        Image(systemName: "lock")
                             .font(.system(size: 10))
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.tertiary)
                     }
                 }
 
-                Text("\(item.displayPath)  •  \(item.reason)")
+                Text("\(item.displayPath)  ·  \(item.reason)")
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
@@ -202,25 +209,21 @@ struct OrphansCleanerView: View {
             Spacer()
 
             Text(ByteFormatter.string(item.sizeBytes))
-                .font(.system(size: 12, design: .monospaced).weight(.medium))
+                .font(.system(size: 11.5).monospacedDigit())
+                .foregroundStyle(.secondary)
 
             Button {
                 viewModel.revealInFinder(item.path)
             } label: {
-                Image(systemName: "magnifyingglass.circle")
-                    .font(.system(size: 16))
-                    .foregroundStyle(.secondary)
+                Image(systemName: "arrow.forward.circle")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.tertiary)
             }
             .buttonStyle(.plain)
-            .help("Hiển thị trong Finder")
+            .help("Hiện trong Finder")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 9))
-        .overlay(
-            RoundedRectangle(cornerRadius: 9)
-                .stroke(Color.primary.opacity(0.07), lineWidth: 1)
-        )
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
         .contentShape(Rectangle())
         .onTapGesture {
             viewModel.toggleOrphanSelection(item.id)
@@ -235,30 +238,41 @@ struct OrphansCleanerView: View {
                 }
             }
             .pickerStyle(.segmented)
-            .frame(width: 300)
+            .controlSize(.small)
+            .frame(width: 280)
 
             Spacer()
 
-            Text("Đã chọn \(viewModel.selectedOrphansCount) mục • \(ByteFormatter.string(viewModel.selectedOrphansBytes))")
-                .font(.subheadline.weight(.medium))
-                .padding(.trailing, 10)
+            Text("Đã chọn \(viewModel.selectedOrphansCount) mục · \(ByteFormatter.string(viewModel.selectedOrphansBytes))")
+                .font(.system(size: 12).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .padding(.trailing, 8)
 
-            Button {
-                viewModel.showOrphanConfirmation = true
-            } label: {
-                Label(
-                    "Dọn sạch (\(ByteFormatter.string(viewModel.selectedOrphansBytes)))",
-                    systemImage: "trash.fill"
-                )
-                .fontWeight(.semibold)
+            if viewModel.removalMode == .permanentDelete {
+                Button(role: .destructive) {
+                    viewModel.showOrphanConfirmation = true
+                } label: {
+                    Text("Xóa vĩnh viễn (\(ByteFormatter.string(viewModel.selectedOrphansBytes)))")
+                        .padding(.horizontal, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .controlSize(.regular)
+                .disabled(viewModel.selectedOrphansCount == 0 || viewModel.isExecutingAction)
+            } else {
+                Button {
+                    viewModel.showOrphanConfirmation = true
+                } label: {
+                    Text("Chuyển vào Thùng rác (\(ByteFormatter.string(viewModel.selectedOrphansBytes)))")
+                        .padding(.horizontal, 6)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
+                .disabled(viewModel.selectedOrphansCount == 0 || viewModel.isExecutingAction)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
-            .controlSize(.large)
-            .disabled(viewModel.selectedOrphansCount == 0 || viewModel.isExecutingAction)
         }
         .padding(.horizontal, 20)
-        .padding(.vertical, 12)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .padding(.vertical, 11)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }

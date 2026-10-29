@@ -9,7 +9,7 @@ struct MainWindowView: View {
     var body: some View {
         NavigationSplitView {
             sidebarContent
-                .navigationSplitViewColumnWidth(min: 205, ideal: 225, max: 255)
+                .navigationSplitViewColumnWidth(min: 195, ideal: 215, max: 245)
         } detail: {
             ZStack(alignment: .top) {
                 detailSectionView
@@ -17,7 +17,7 @@ struct MainWindowView: View {
 
                 if let toast = viewModel.bannerToast {
                     floatingToastView(toast)
-                        .padding(.top, 14)
+                        .padding(.top, 12)
                         .transition(.move(edge: .top).combined(with: .opacity))
                         .zIndex(20)
                 }
@@ -30,8 +30,9 @@ struct MainWindowView: View {
             .onDrop(of: [.fileURL], isTargeted: $viewModel.isGlobalDropTargeted) { providers in
                 handleGlobalDrop(providers)
             }
+            .navigationTitle(viewModel.activeSection.title)
             .toolbar {
-                ToolbarItem(placement: .automatic) {
+                ToolbarItemGroup(placement: .automatic) {
                     toolbarUpdateControl
                 }
             }
@@ -61,52 +62,12 @@ struct MainWindowView: View {
         }
     }
 
-    // MARK: - Sidebar
+    // MARK: - Native macOS Sidebar
 
     private var sidebarContent: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // App Brand Header
-            HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 9)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    Color(red: 0.95, green: 0.24, blue: 0.32),
-                                    Color(red: 0.98, green: 0.50, blue: 0.18)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 32, height: 32)
-                    Image(systemName: "trash.slash.fill")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundStyle(.white)
-                }
-
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(spacing: 5) {
-                        Text("AppSweep")
-                            .font(.system(size: 15, weight: .bold))
-                        Text("v\(updateService.currentVersion)")
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Color.secondary.opacity(0.14), in: Capsule())
-                    }
-                    Text("Gỡ ứng dụng triệt để")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, 14)
-            .padding(.bottom, 12)
-
             List(selection: $viewModel.activeSection) {
-                Section("Chức năng chính") {
+                Section("Danh mục") {
                     ForEach(NavigationSection.allCases) { section in
                         sidebarRow(section)
                             .tag(section)
@@ -117,26 +78,18 @@ struct MainWindowView: View {
 
             Divider()
 
-            VStack(spacing: 8) {
-                sidebarUpdateCard
-                fdaFooterCard
-            }
-            .padding(10)
+            sidebarStatusFooter
         }
     }
 
     private func sidebarRow(_ section: NavigationSection) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             Label(section.title, systemImage: section.symbolName)
-                .font(.system(size: 13, weight: .medium))
-            Spacer()
+            Spacer(minLength: 4)
             if let badge = badgeText(for: section) {
                 Text(badge)
-                    .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                    .font(.system(size: 11, weight: .medium).monospacedDigit())
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 1)
-                    .background(Color.secondary.opacity(0.14), in: Capsule())
             }
         }
     }
@@ -156,7 +109,7 @@ struct MainWindowView: View {
         }
     }
 
-    // MARK: - Auto-Update Controls (Toolbar & Sidebar)
+    // MARK: - Quiet Native Sidebar Footer & Toolbar Controls
 
     @ViewBuilder
     private var toolbarUpdateControl: some View {
@@ -165,22 +118,22 @@ struct MainWindowView: View {
             HStack(spacing: 6) {
                 ProgressView()
                     .controlSize(.small)
-                Text("Đang kiểm tra tag...")
+                Text("Đang kiểm tra...")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, 4)
 
         case let .downloading(ver, progress):
             HStack(spacing: 6) {
                 ProgressView(value: progress, total: 1.0)
                     .progressViewStyle(.linear)
-                    .frame(width: 70)
-                Text("Tải v\(ver) (\(Int(progress * 100))%)")
+                    .frame(width: 64)
+                Text("v\(ver) (\(Int(progress * 100))%)")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, 4)
 
         case let .installing(ver):
             HStack(spacing: 6) {
@@ -190,138 +143,147 @@ struct MainWindowView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, 4)
 
         case let .available(info):
             Button {
                 updateService.installAvailableUpdate()
             } label: {
-                Label("Cập nhật v\(info.version)", systemImage: "arrow.down.circle.fill")
-                    .font(.caption.weight(.semibold))
+                Label("Cập nhật v\(info.version)", systemImage: "arrow.down.circle")
             }
             .buttonStyle(.borderedProminent)
-            .tint(.green)
-            .help("Tự động tải và cài đặt AppSweep v\(info.version) từ github.com/hungmtuci/AppSweep")
+            .controlSize(.small)
+            .help("Tự động tải và cài đặt AppSweep v\(info.version) từ GitHub")
 
         case .idle, .upToDate, .failed:
             Button {
                 updateService.checkForUpdatesManually()
             } label: {
                 Label("Kiểm tra cập nhật", systemImage: "arrow.triangle.2.circlepath")
-                    .font(.caption)
             }
-            .help("Đối chiếu tag mới nhất trên github.com/hungmtuci/AppSweep để tải và cập nhật tự động")
+            .help("Kiểm tra phiên bản mới từ github.com/hungmtuci/AppSweep (⌘U)")
         }
     }
 
-    private var sidebarUpdateCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
+    private var sidebarStatusFooter: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Version & Update status row
             switch updateService.state {
             case .checking:
-                HStack(spacing: 7) {
+                HStack(spacing: 6) {
                     ProgressView()
-                        .controlSize(.small)
-                    Text("Đang đối chiếu tag GitHub...")
-                        .font(.caption.weight(.medium))
+                        .controlSize(.mini)
+                    Text("Đang kiểm tra cập nhật...")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
 
             case let .downloading(ver, progress):
-                Text("Đang tải AppSweep v\(ver) (\(Int(progress * 100))%)...")
-                    .font(.caption.weight(.semibold))
-                ProgressView(value: progress, total: 1.0)
-                    .progressViewStyle(.linear)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Đang tải v\(ver) (\(Int(progress * 100))%)")
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    ProgressView(value: progress, total: 1.0)
+                        .progressViewStyle(.linear)
+                        .controlSize(.small)
+                }
 
             case let .installing(ver):
-                HStack(spacing: 7) {
+                HStack(spacing: 6) {
                     ProgressView()
-                        .controlSize(.small)
-                    Text("Đang cài đặt v\(ver) & khởi động lại...")
-                        .font(.caption.weight(.semibold))
+                        .controlSize(.mini)
+                    Text("Đang cài v\(ver)...")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
 
             case let .available(info):
-                HStack(spacing: 5) {
-                    Image(systemName: "sparkles")
-                        .foregroundStyle(.green)
-                    Text("Có phiên bản mới v\(info.version)")
-                        .font(.caption.weight(.bold))
+                HStack {
+                    Text("Có bản mới v\(info.version)")
+                        .font(.system(size: 11, weight: .semibold))
+                    Spacer()
+                    Button("Cập nhật") {
+                        updateService.installAvailableUpdate()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.mini)
                 }
-                Button {
-                    updateService.installAvailableUpdate()
-                } label: {
-                    Label("Tải & Cập nhật ngay", systemImage: "arrow.down.circle.fill")
-                        .font(.caption.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-                .controlSize(.small)
 
-            case let .upToDate(ver):
+            case .idle, .upToDate, .failed:
+                HStack(spacing: 6) {
+                    Text("Phiên bản \(updateService.currentVersion)")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Button {
+                        updateService.checkForUpdatesManually()
+                    } label: {
+                        Text("Kiểm tra")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.link)
+                    .help("Kiểm tra bản cập nhật mới trên GitHub")
+
+                    Text("·")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+
+                    Button {
+                        updateService.openGitHubRepoPage()
+                    } label: {
+                        Text("GitHub")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.link)
+                    .help("Mở trang mã nguồn github.com/hungmtuci/AppSweep")
+                }
+            }
+
+            Toggle("Tự kiểm tra khi mở ứng dụng", isOn: $updateService.autoCheckOnLaunch)
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            Divider()
+
+            // Full Disk Access subtle row
+            if viewModel.hasFullDiskAccess {
                 HStack(spacing: 5) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.caption)
-                    Text("Bản mới nhất (v\(ver))")
-                        .font(.caption.weight(.medium))
+                    Image(systemName: "checkmark.shield")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Text("Quyền truy cập đĩa: Đầy đủ")
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
-                Button {
-                    updateService.checkForUpdatesManually()
-                } label: {
-                    Label("Kiểm tra cập nhật", systemImage: "arrow.triangle.2.circlepath")
-                        .font(.caption.weight(.medium))
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-            case .idle, .failed:
-                Button {
-                    updateService.checkForUpdatesManually()
-                } label: {
-                    Label("Kiểm tra cập nhật", systemImage: "arrow.triangle.2.circlepath")
-                        .font(.caption.weight(.medium))
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-
-            HStack(spacing: 4) {
-                Toggle("Tự kiểm tra", isOn: $updateService.autoCheckOnLaunch)
-                    .toggleStyle(.checkbox)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-                    .help("Tự động kiểm tra bản mới trên GitHub khi mở ứng dụng")
-
-                Spacer()
-
-                Button {
-                    updateService.openGitHubRepoPage()
-                } label: {
-                    HStack(spacing: 2) {
-                        Text("GitHub")
-                        Image(systemName: "arrow.up.right.square")
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "lock.shield")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        Text("Chưa cấp Full Disk Access")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
                     }
-                    .font(.system(size: 10.5))
+                    Button("Mở Cài đặt Quyền...") {
+                        PermissionService.openFullDiskAccessSettings()
+                    }
+                    .buttonStyle(.link)
+                    .font(.system(size: 11))
                 }
-                .buttonStyle(.link)
-                .help("Mở kho mã nguồn github.com/hungmtuci/AppSweep")
             }
         }
-        .padding(9)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-        )
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
     }
 
     private var updateAlertTitle: String {
         if case let .available(info) = updateService.state {
-            return "Đã có bản cập nhật AppSweep v\(info.version)!"
+            return "Đã có bản cập nhật AppSweep v\(info.version)"
         }
         return "Cập nhật AppSweep"
     }
@@ -331,57 +293,14 @@ struct MainWindowView: View {
             return ""
         }
         var lines: [String] = [
-            "Phát hiện tag mới \(info.rawTag) trên github.com/\(UpdateCheckerService.githubOwner)/\(UpdateCheckerService.githubRepo) (phiên bản hiện tại: v\(updateService.currentVersion))."
+            "Phát hiện phiên bản mới \(info.rawTag) trên github.com/\(UpdateCheckerService.githubOwner)/\(UpdateCheckerService.githubRepo) (hiện tại: v\(updateService.currentVersion))."
         ]
         if let notes = info.releaseNotes?.trimmingCharacters(in: .whitespacesAndNewlines), !notes.isEmpty {
             let trimmedNotes = notes.count > 260 ? String(notes.prefix(260)) + "..." : notes
             lines.append("\nNội dung cập nhật:\n\(trimmedNotes)")
         }
-        lines.append("\nNhấn 'Tải & Cập nhật tự động' để tải gói cài đặt mới, thay thế ứng dụng, gỡ cờ Gatekeeper và tự khởi động lại.")
+        lines.append("\nNhấn 'Tải & Cập nhật tự động' để tải gói cài đặt mới, thay thế ứng dụng và tự khởi động lại.")
         return lines.joined(separator: "\n")
-    }
-
-    private var fdaFooterCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if viewModel.hasFullDiskAccess {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.shield.fill")
-                        .foregroundStyle(.green)
-                    Text("Quét sâu toàn bộ đĩa: Đã bật")
-                        .font(.caption.weight(.semibold))
-                }
-                Text("AppSweep có toàn quyền quét sạch Sandbox Containers & Caches ẩn.")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-            } else {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.shield.fill")
-                        .foregroundStyle(.orange)
-                    Text("Khuyên bật Full Disk Access")
-                        .font(.caption.weight(.semibold))
-                }
-                Text("Giúp quét 100% thư mục Sandbox Containers được macOS bảo vệ.")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-
-                Button {
-                    PermissionService.openFullDiskAccessSettings()
-                } label: {
-                    Text("Mở Cài đặt Quyền...")
-                        .font(.caption.weight(.medium))
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-        )
     }
 
     // MARK: - Detail Router
@@ -402,33 +321,30 @@ struct MainWindowView: View {
         }
     }
 
-    // MARK: - Toast & Global Drop Overlay
+    // MARK: - Subtle macOS Toast & Drop Overlay
 
     private func floatingToastView(_ toast: BannerToast) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: toast.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                .font(.title3)
-                .foregroundStyle(toast.isError ? .orange : .green)
+        HStack(spacing: 10) {
+            Image(systemName: toast.isError ? "exclamationmark.circle" : "checkmark.circle")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(toast.isError ? .primary : .secondary)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text(toast.title)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.system(size: 12.5, weight: .semibold))
                 if let sub = toast.subtitle {
                     Text(sub)
-                        .font(.caption)
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
             }
 
             if let undoID = toast.restorableRecordID {
-                Button {
+                Button("Hoàn tác") {
                     viewModel.bannerToast = nil
                     viewModel.restoreFromHistory(undoID)
-                } label: {
-                    Label("Hoàn tác ngay", systemImage: "arrow.uturn.backward")
-                        .font(.caption.weight(.semibold))
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.bordered)
                 .controlSize(.small)
             }
 
@@ -438,41 +354,41 @@ struct MainWindowView: View {
                 }
             } label: {
                 Image(systemName: "xmark")
-                    .font(.caption)
+                    .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 11)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
     }
 
     private var globalDropOverlay: some View {
         ZStack {
-            Color.accentColor.opacity(0.14)
+            Color(nsColor: .windowBackgroundColor).opacity(0.75)
                 .ignoresSafeArea()
 
-            VStack(spacing: 12) {
-                Image(systemName: "arrow.down.app.fill")
-                    .font(.system(size: 54))
-                    .foregroundStyle(Color.accentColor)
-                Text("Thả ứng dụng hoặc Plugin vào đây để quét sâu")
-                    .font(.title2.weight(.bold))
-                Text("AppSweep sẽ tự động dò toàn bộ file liên quan trước khi gỡ bỏ")
-                    .font(.subheadline)
+            VStack(spacing: 10) {
+                Image(systemName: "arrow.down.app")
+                    .font(.system(size: 42, weight: .light))
+                    .foregroundStyle(.secondary)
+                Text("Thả ứng dụng hoặc Plugin để quét dữ liệu liên quan")
+                    .font(.headline)
+                Text("Hỗ trợ chọn một hoặc nhiều mục cùng lúc")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            .padding(36)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
+            .padding(32)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
             .overlay(
-                RoundedRectangle(cornerRadius: 20)
-                    .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 2.5, dash: [8, 6]))
+                RoundedRectangle(cornerRadius: 14)
+                    .strokeBorder(Color(nsColor: .separatorColor), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
             )
         }
     }

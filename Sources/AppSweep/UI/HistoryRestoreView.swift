@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct HistoryRestoreView: View {
@@ -27,24 +28,25 @@ struct HistoryRestoreView: View {
             Divider()
 
             if viewModel.historyRecords.isEmpty {
-                VStack(spacing: 12) {
+                VStack(spacing: 10) {
                     Spacer()
                     Image(systemName: "clock.arrow.circlepath")
-                        .font(.system(size: 48))
+                        .font(.system(size: 36, weight: .ultraLight))
+                        .foregroundStyle(.tertiary)
+                    Text("Chưa có lịch sử dọn dẹp")
+                        .font(.headline)
                         .foregroundStyle(.secondary)
-                    Text("Chưa có lịch sử gỡ cài đặt nào")
-                        .font(.title3.weight(.semibold))
-                    Text("Mọi hoạt động gỡ bỏ ứng dụng, bản sao lưu .zip và gói khôi phục trong Thùng rác sẽ được lưu chi tiết tại đây.")
+                    Text("Nhật ký gỡ ứng dụng, bản sao lưu .zip và các gói có thể khôi phục từ Thùng rác sẽ hiển thị tại đây.")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
                         .multilineTextAlignment(.center)
-                        .frame(maxWidth: 420)
+                        .frame(maxWidth: 400)
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 12) {
+                    LazyVStack(spacing: 8) {
                         ForEach(viewModel.historyRecords) { record in
                             recordCard(record)
                         }
@@ -53,150 +55,109 @@ struct HistoryRestoreView: View {
                 }
             }
         }
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var summaryHeader: some View {
-        HStack(spacing: 16) {
-            statTile(
-                icon: "externaldrive.badge.checkmark",
-                color: .green,
-                title: "Tổng dung lượng đã giải phóng",
-                value: ByteFormatter.string(totalLifetimeBytes)
-            )
-            statTile(
-                icon: "list.bullet.clipboard.fill",
-                color: .blue,
-                title: "Phiên dọn dẹp đã thực hiện",
-                value: "\(viewModel.historyRecords.count) phiên"
-            )
-            statTile(
-                icon: "arrow.uturn.backward.circle.fill",
-                color: .orange,
-                title: "Có thể Hoàn tác ngay từ Trash",
-                value: "\(restorableCount) mục"
-            )
+        HStack(spacing: 24) {
+            metricColumn(title: "Đã giải phóng", value: ByteFormatter.string(totalLifetimeBytes))
+
+            Divider()
+                .frame(height: 28)
+
+            metricColumn(title: "Phiên dọn dẹp", value: "\(viewModel.historyRecords.count)")
+
+            Divider()
+                .frame(height: 28)
+
+            metricColumn(title: "Có thể hoàn tác", value: "\(restorableCount)")
 
             Spacer()
 
             if !viewModel.historyRecords.isEmpty {
-                Button(role: .destructive) {
+                Button("Xóa nhật ký") {
                     viewModel.clearHistoryLog()
-                } label: {
-                    Label("Xóa nhật ký", systemImage: "trash")
-                        .font(.caption)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
         }
-        .padding(.horizontal, 22)
-        .padding(.vertical, 14)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
     }
 
-    private func statTile(icon: String, color: Color, title: String, value: String) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon)
-                .font(.title2)
-                .foregroundStyle(color)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(value)
-                    .font(.headline.weight(.bold))
-            }
+    private func metricColumn(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 15, weight: .semibold).monospacedDigit())
+                .foregroundStyle(.primary)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 9)
-        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.07)))
     }
 
     private func recordCard(_ record: UninstallHistoryRecord) -> some View {
         let isExpanded = viewModel.expandedHistoryRecordIDs.contains(record.id)
 
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 12) {
-                Image(systemName: record.isFullyRestored ? "arrow.uturn.backward.circle.fill" : "checkmark.circle.fill")
-                    .font(.title2)
-                    .foregroundStyle(record.isFullyRestored ? .blue : .green)
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 12)
 
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 8) {
                         Text(record.targetName)
-                            .font(.headline)
+                            .font(.system(size: 13, weight: .medium))
 
-                        Text(record.mode == .moveToTrash ? "Thùng rác" : "Xóa vĩnh viễn")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(record.mode == .moveToTrash ? .blue : .red)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 2)
-                            .background((record.mode == .moveToTrash ? Color.blue : Color.red).opacity(0.12), in: Capsule())
-
-                        if record.isFullyRestored {
-                            Text("Đã hoàn tác khôi phục")
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(.green)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(Color.green.opacity(0.13), in: Capsule())
-                        }
+                        Text(statusSummaryLabel(record))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
                     }
 
-                    Text("\(Self.dateFormatter.string(from: record.timestamp))  •  \(record.removedCount) mục  •  \(ByteFormatter.string(record.totalBytesFreed))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text("\(Self.dateFormatter.string(from: record.timestamp))  ·  \(record.removedCount) mục  ·  \(ByteFormatter.string(record.totalBytesFreed))")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.tertiary)
                 }
 
                 Spacer()
 
                 if let zipPath = record.archiveZipPath, FileManager.default.fileExists(atPath: zipPath) {
-                    Button {
+                    Button("Bản lưu .zip") {
                         viewModel.revealInFinder(zipPath)
-                    } label: {
-                        Label("Mở bản lưu .zip", systemImage: "doc.zipper")
-                            .font(.caption)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
 
                 if let trashFolder = record.trashContainerPath, FileManager.default.fileExists(atPath: trashFolder) {
-                    Button {
+                    Button("Xem trong Trash") {
                         viewModel.revealInFinder(trashFolder)
-                    } label: {
-                        Label("Xem trong Trash", systemImage: "folder")
-                            .font(.caption)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
 
                 if record.canRestore {
-                    Button {
+                    Button("Hoàn tác") {
                         viewModel.restoreFromHistory(record.id)
-                    } label: {
-                        Label("Hoàn tác (Khôi phục)", systemImage: "arrow.uturn.backward")
-                            .font(.caption.weight(.semibold))
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.blue)
                     .controlSize(.small)
                     .disabled(viewModel.isExecutingAction)
                 }
-
-                Button {
-                    if isExpanded {
-                        viewModel.expandedHistoryRecordIDs.remove(record.id)
-                    } else {
-                        viewModel.expandedHistoryRecordIDs.insert(record.id)
-                    }
-                } label: {
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if isExpanded {
+                    viewModel.expandedHistoryRecordIDs.remove(record.id)
+                } else {
+                    viewModel.expandedHistoryRecordIDs.insert(record.id)
                 }
-                .buttonStyle(.plain)
             }
 
             if isExpanded {
@@ -204,9 +165,10 @@ struct HistoryRestoreView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     ForEach(record.entries) { entry in
                         HStack(spacing: 8) {
-                            Image(systemName: entry.isRestored ? "arrow.uturn.backward.circle.fill" : "minus.circle.fill")
-                                .font(.caption)
-                                .foregroundStyle(entry.isRestored ? .green : .secondary)
+                            Image(systemName: entry.isRestored ? "arrow.uturn.backward" : "minus")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 12)
                             Text(PathFormatter.prettyPath(entry.originalPath))
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(.secondary)
@@ -214,19 +176,27 @@ struct HistoryRestoreView: View {
                                 .truncationMode(.middle)
                             Spacer()
                             Text(ByteFormatter.string(entry.sizeBytes))
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(.secondary)
+                                .font(.system(size: 11).monospacedDigit())
+                                .foregroundStyle(.tertiary)
                         }
                     }
                 }
-                .padding(.top, 4)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(Color(nsColor: .windowBackgroundColor).opacity(0.4))
             }
         }
-        .padding(14)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
         )
+    }
+
+    private func statusSummaryLabel(_ record: UninstallHistoryRecord) -> String {
+        if record.isFullyRestored {
+            return "· Đã hoàn tác khôi phục"
+        }
+        return record.mode == .moveToTrash ? "· Đã chuyển vào Thùng rác" : "· Đã xóa vĩnh viễn"
     }
 }

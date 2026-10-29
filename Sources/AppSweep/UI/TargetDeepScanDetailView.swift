@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct TargetDeepScanDetailView: View {
@@ -17,24 +18,24 @@ struct TargetDeepScanDetailView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            headerSummaryCard
+            headerSummarySection
             Divider()
 
             if viewModel.isScanningTarget {
-                VStack(spacing: 14) {
+                VStack(spacing: 10) {
                     Spacer()
                     ProgressView()
-                        .controlSize(.large)
-                    Text("Đang quét sâu toàn bộ dữ liệu liên quan của \(target.name)...")
-                        .font(.headline)
-                    Text("Đang kiểm tra Containers, Group Containers, LaunchAgents, Caches, Preferences & Receipts")
+                        .controlSize(.regular)
+                    Text("Đang phân tích dữ liệu của \(target.name)...")
+                        .font(.subheadline.weight(.medium))
+                    Text("Kiểm tra Application Support, Containers, Caches, Preferences & LaunchAgents")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                presetAndBreakdownBar
+                presetAndStorageBar
                 Divider()
                 associatedFilesScrollList
             }
@@ -51,123 +52,75 @@ struct TargetDeepScanDetailView: View {
             Button(confirmPrimaryButtonLabel, role: .destructive) {
                 viewModel.executeSelectedUninstall()
             }
-            Button("Hủy bỏ", role: .cancel) {}
+            Button("Hủy", role: .cancel) {}
         } message: {
             Text(confirmDialogMessage)
         }
     }
 
-    // MARK: - Top Header Card
+    // MARK: - Top Inspector Header
 
-    private var headerSummaryCard: some View {
-        HStack(alignment: .center, spacing: 16) {
+    private var headerSummarySection: some View {
+        HStack(alignment: .center, spacing: 14) {
             Image(nsImage: viewModel.icon(for: target.path))
                 .resizable()
                 .interpolation(.high)
-                .frame(width: 64, height: 64)
-                .shadow(color: .black.opacity(0.12), radius: 4, y: 2)
+                .frame(width: 52, height: 52)
 
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(target.name)
-                        .font(.title2.weight(.bold))
+                        .font(.title3.weight(.semibold))
                         .lineLimit(1)
 
-                    Text("v\(target.version)")
-                        .font(.caption.weight(.medium))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(Color.secondary.opacity(0.14), in: Capsule())
-
-                    if target.architecture != .unknown {
-                        Text(target.architecture.rawValue)
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.blue)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 2)
-                            .background(Color.blue.opacity(0.12), in: Capsule())
-                    }
-
-                    if viewModel.isRunning(target) {
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(Color.green)
-                                .frame(width: 6, height: 6)
-                            Text("Đang chạy")
-                        }
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.green)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2)
-                        .background(Color.green.opacity(0.12), in: Capsule())
-                    }
-
-                    if target.isSystemProtected {
-                        Label("Hệ thống bảo vệ", systemImage: "lock.shield.fill")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.orange)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 2)
-                            .background(Color.orange.opacity(0.14), in: Capsule())
-                    }
+                    Text(metadataInlineLabel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
 
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     if !target.bundleIdentifier.isEmpty {
                         Text(target.bundleIdentifier)
-                            .font(.system(.caption, design: .monospaced))
+                            .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                     }
                     if let team = target.teamIdentifier {
-                        Text("• Team ID: \(team)")
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundStyle(.secondary)
+                        Text("· Team \(team)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.tertiary)
                     }
                 }
 
                 if target.kind == .application {
                     let running = viewModel.isRunning(target)
-                    let level = target.usageLevel(isRunning: running)
-                    HStack(spacing: 5) {
-                        Image(systemName: level.symbolName)
-                            .font(.caption2)
-                            .foregroundStyle(level.color)
-                        Text(target.detailedUsageSummary(isRunning: running))
-                            .font(.caption)
-                            .foregroundStyle(level == .neverUsed ? Color.red : (level == .dormant ? Color.orange : Color.secondary))
-                            .lineLimit(1)
-                    }
+                    Text(target.detailedUsageSummary(isRunning: running))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
 
                 HStack(spacing: 6) {
-                    Image(systemName: "folder")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
                     Text(target.displayPath)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
                         .lineLimit(1)
                         .truncationMode(.middle)
 
-                    Button {
+                    Button("Hiện trong Finder") {
                         viewModel.revealInFinder(target.path)
-                    } label: {
-                        Label("Mở trong Finder", systemImage: "arrow.up.forward.square")
-                            .font(.caption2)
                     }
                     .buttonStyle(.link)
+                    .font(.system(size: 11))
                 }
             }
 
-            Spacer()
+            Spacer(minLength: 12)
 
-            VStack(alignment: .trailing, spacing: 4) {
-                Text("Tổng dung lượng phát hiện")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .trailing, spacing: 2) {
                 Text(ByteFormatter.string(viewModel.totalDiscoveredBytes))
-                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                    .font(.system(size: 20, weight: .semibold).monospacedDigit())
                     .foregroundStyle(.primary)
                 Text("\(viewModel.associatedItems.count) mục liên quan")
                     .font(.caption)
@@ -175,40 +128,52 @@ struct TargetDeepScanDetailView: View {
             }
         }
         .padding(.horizontal, 20)
-        .padding(.vertical, 16)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+        .padding(.vertical, 14)
     }
 
-    // MARK: - Storage Breakdown & Quick Presets
+    private var metadataInlineLabel: String {
+        var parts: [String] = ["v\(target.version)"]
+        if target.architecture != .unknown {
+            parts.append(target.architecture.rawValue)
+        }
+        if viewModel.isRunning(target) {
+            parts.append("Đang mở")
+        }
+        if target.isSystemProtected {
+            parts.append("Hệ thống bảo vệ")
+        }
+        return parts.joined(separator: " · ")
+    }
 
-    private var presetAndBreakdownBar: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Proportional Segmented Bar
+    // MARK: - Calm Tonal Storage Bar & Presets
+
+    private var presetAndStorageBar: some View {
+        VStack(alignment: .leading, spacing: 9) {
             if viewModel.totalDiscoveredBytes > 0 {
                 GeometryReader { geo in
-                    HStack(spacing: 2) {
+                    HStack(spacing: 1.5) {
                         ForEach(groupedCategories, id: \.category) { group in
-                            let ratio = max(0.015, CGFloat(group.totalBytes) / CGFloat(max(1, viewModel.totalDiscoveredBytes)))
-                            RoundedRectangle(cornerRadius: 3)
-                                .fill(group.category.accentColor.gradient)
-                                .frame(width: max(4, (geo.size.width - CGFloat(groupedCategories.count * 2)) * ratio))
+                            let ratio = max(0.012, CGFloat(group.totalBytes) / CGFloat(max(1, viewModel.totalDiscoveredBytes)))
+                            Rectangle()
+                                .fill(group.category.storageSegmentColor)
+                                .frame(width: max(3, (geo.size.width - CGFloat(groupedCategories.count) * 1.5) * ratio))
                                 .help("\(group.category.title): \(ByteFormatter.string(group.totalBytes))")
                         }
                     }
                 }
-                .frame(height: 8)
-                .clipShape(Capsule())
+                .frame(height: 6)
+                .background(Color.primary.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 3))
 
-                // Legend chips
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
+                    HStack(spacing: 14) {
                         ForEach(groupedCategories, id: \.category) { group in
                             HStack(spacing: 5) {
-                                Circle()
-                                    .fill(group.category.accentColor)
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(group.category.storageSegmentColor)
                                     .frame(width: 7, height: 7)
-                                Text("\(group.category.shortBadge): \(ByteFormatter.string(group.totalBytes))")
-                                    .font(.caption2)
+                                Text("\(group.category.shortBadge) \(ByteFormatter.string(group.totalBytes))")
+                                    .font(.system(size: 11).monospacedDigit())
                                     .foregroundStyle(.secondary)
                             }
                         }
@@ -216,36 +181,26 @@ struct TargetDeepScanDetailView: View {
                 }
             }
 
-            // Quick Selection Mode Presets
-            HStack(spacing: 8) {
-                Text("Chế độ chọn nhanh:")
-                    .font(.caption.weight(.medium))
+            HStack(spacing: 6) {
+                Text("Chọn nhanh:")
+                    .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
 
-                Button {
+                Button("Gỡ bỏ hoàn toàn") {
                     viewModel.applyPresetCompleteUninstall()
-                } label: {
-                    Label("Gỡ bỏ hoàn toàn", systemImage: "trash.circle")
-                        .font(.caption.weight(.medium))
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(target.isSystemProtected)
 
-                Button {
+                Button("Chỉ xóa dữ liệu") {
                     viewModel.applyPresetResetAppDataOnly()
-                } label: {
-                    Label("Chỉ xóa dữ liệu (Reset App)", systemImage: "arrow.counterclockwise.circle")
-                        .font(.caption.weight(.medium))
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
-                Button {
+                Button("Chỉ dọn Cache & Logs") {
                     viewModel.applyPresetCachesAndLogsOnly()
-                } label: {
-                    Label("Chỉ dọn Cache & Logs", systemImage: "bolt.circle")
-                        .font(.caption.weight(.medium))
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -256,7 +211,7 @@ struct TargetDeepScanDetailView: View {
                     viewModel.rescanSelectedTarget()
                 } label: {
                     Label("Quét lại", systemImage: "arrow.clockwise")
-                        .font(.caption)
+                        .font(.system(size: 11.5))
                 }
                 .buttonStyle(.borderless)
             }
@@ -265,152 +220,152 @@ struct TargetDeepScanDetailView: View {
         .padding(.vertical, 10)
     }
 
-    // MARK: - Categorized Associated File List
+    // MARK: - Native Inset Grouped File Sections
 
     private var associatedFilesScrollList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
                 ForEach(groupedCategories, id: \.category) { group in
-                    categoryCard(category: group.category, items: group.items, categoryBytes: group.totalBytes)
+                    categorySection(category: group.category, items: group.items, categoryBytes: group.totalBytes)
                 }
             }
-            .padding(18)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
         }
     }
 
-    private func categoryCard(
+    private func categorySection(
         category: FileCategory,
         items: [AssociatedFileItem],
         categoryBytes: Int64
     ) -> some View {
         let allSelected = items.allSatisfy(\.isSelected)
 
-        return VStack(alignment: .leading, spacing: 0) {
-            // Category Header
-            HStack(spacing: 10) {
-                Button {
-                    viewModel.setCategorySelection(category, selected: !allSelected)
-                } label: {
-                    Image(systemName: allSelected ? "checkmark.square.fill" : "square")
-                        .foregroundStyle(allSelected ? Color.accentColor : Color.secondary)
-                        .font(.system(size: 14, weight: .semibold))
-                }
-                .buttonStyle(.plain)
+        return VStack(alignment: .leading, spacing: 5) {
+            // Quiet macOS Group Header
+            HStack(spacing: 7) {
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { allSelected },
+                        set: { newValue in viewModel.setCategorySelection(category, selected: newValue) }
+                    )
+                )
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+                .controlSize(.small)
 
                 Image(systemName: category.symbolName)
-                    .foregroundStyle(category.accentColor)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
 
                 Text(category.title)
-                    .font(.subheadline.weight(.semibold))
-
-                Text("\(items.count)")
-                    .font(.caption2.weight(.bold))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 1)
-                    .background(Color.secondary.opacity(0.14), in: Capsule())
+
+                Text("(\(items.count))")
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(.tertiary)
 
                 Spacer()
 
                 Text(ByteFormatter.string(categoryBytes))
-                    .font(.system(.caption, design: .monospaced).weight(.semibold))
+                    .font(.system(size: 11.5, weight: .medium).monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-            .background(category.accentColor.opacity(0.07))
+            .padding(.horizontal, 4)
 
-            Divider()
-
-            // File Rows
-            ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
-                associatedFileRow(item)
-                if idx < items.count - 1 {
-                    Divider()
-                        .padding(.leading, 40)
+            // Inset Grouped Rows
+            VStack(spacing: 0) {
+                ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
+                    associatedFileRow(item)
+                    if idx < items.count - 1 {
+                        Divider()
+                            .padding(.leading, 38)
+                    }
                 }
             }
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+            )
         }
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-        )
     }
 
     private func associatedFileRow(_ item: AssociatedFileItem) -> some View {
         let isLockedRootApp = target.isSystemProtected && item.path == target.path
 
-        return HStack(spacing: 10) {
-            Button {
-                viewModel.toggleItemSelection(item.id)
-            } label: {
-                Image(systemName: item.isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isLockedRootApp ? Color.secondary.opacity(0.4) : (item.isSelected ? Color.accentColor : Color.secondary))
-                    .font(.system(size: 15))
-            }
-            .buttonStyle(.plain)
+        return HStack(spacing: 9) {
+            Toggle(
+                "",
+                isOn: Binding(
+                    get: { item.isSelected },
+                    set: { _ in
+                        if !isLockedRootApp {
+                            viewModel.toggleItemSelection(item.id)
+                        }
+                    }
+                )
+            )
+            .toggleStyle(.checkbox)
+            .labelsHidden()
+            .controlSize(.small)
             .disabled(isLockedRootApp)
 
             Image(nsImage: viewModel.icon(for: item.path))
                 .resizable()
-                .frame(width: 24, height: 24)
+                .frame(width: 20, height: 20)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 1.5) {
                 HStack(spacing: 6) {
                     Text(item.name)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(item.isSelected ? .primary : .secondary)
                         .lineLimit(1)
 
                     if item.confidence == .sharedVendor {
-                        Text("Dùng chung hãng")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.orange)
-                            .padding(.horizontal, 6)
+                        Text("Dùng chung")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
                             .padding(.vertical, 1)
-                            .background(Color.orange.opacity(0.14), in: Capsule())
+                            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 4))
                     }
 
                     if item.requiresAdmin {
-                        HStack(spacing: 3) {
-                            Image(systemName: "lock.fill")
-                            Text("Admin")
-                        }
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Color.secondary.opacity(0.12), in: Capsule())
-                        .help("Mục nằm trong thư mục hệ thống, macOS sẽ hỏi xác thực Touch ID / Mật khẩu khi gỡ")
+                        Image(systemName: "lock")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                            .help("Nằm trong thư mục hệ thống — cần xác thực Touch ID / Mật khẩu khi xóa")
                     }
                 }
 
-                Text("\(item.displayPath)  •  \(item.matchReason)")
+                Text(item.displayPath)
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.tertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
 
-            Spacer()
+            Spacer(minLength: 8)
 
             Text(ByteFormatter.string(item.sizeBytes))
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundStyle(item.isSelected ? .primary : .secondary)
+                .font(.system(size: 11.5).monospacedDigit())
+                .foregroundStyle(item.isSelected ? Color.secondary : Color(nsColor: .tertiaryLabelColor))
 
             Button {
                 viewModel.revealInFinder(item.path)
             } label: {
-                Image(systemName: "magnifyingglass.circle")
-                    .font(.system(size: 15))
-                    .foregroundStyle(.secondary)
+                Image(systemName: "arrow.forward.circle")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.tertiary)
             }
             .buttonStyle(.plain)
-            .help("Hiển thị trong Finder")
+            .help("Hiện trong Finder")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6.5)
         .contentShape(Rectangle())
         .onTapGesture {
             if !isLockedRootApp {
@@ -419,117 +374,124 @@ struct TargetDeepScanDetailView: View {
         }
     }
 
-    // MARK: - Sticky Action Footer
+    // MARK: - Native Bottom Action Bar
 
     private var bottomActionFooter: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 8) {
             HStack(spacing: 14) {
-                Text("Chế độ xóa:")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
-
-                Picker("", selection: $viewModel.removalMode) {
+                Picker("Chế độ:", selection: $viewModel.removalMode) {
                     ForEach(RemovalMode.allCases) { mode in
                         Text(mode.shortTitle).tag(mode)
                     }
                 }
-                .labelsHidden()
                 .pickerStyle(.segmented)
-                .frame(width: 260)
+                .controlSize(.small)
+                .frame(width: 280)
 
-                Toggle("Sao lưu .zip trước khi xóa", isOn: $viewModel.createZipBackup)
+                Toggle("Sao lưu .zip", isOn: $viewModel.createZipBackup)
                     .toggleStyle(.checkbox)
-                    .font(.caption)
-                    .help("Nén toàn bộ các mục đã chọn thành 1 file .zip trong ~/Downloads/AppSweep Backups trước khi xóa")
+                    .controlSize(.small)
+                    .font(.system(size: 11.5))
+                    .help("Lưu bản nén dự phòng vào ~/Downloads/AppSweep Backups trước khi xóa")
 
                 if target.kind == .application {
-                    Toggle("Gỡ icon khỏi Dock", isOn: $viewModel.cleanDockIcon)
+                    Toggle("Gỡ khỏi Dock", isOn: $viewModel.cleanDockIcon)
                         .toggleStyle(.checkbox)
-                        .font(.caption)
+                        .controlSize(.small)
+                        .font(.system(size: 11.5))
                 }
 
                 Spacer()
             }
 
             HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 1.5) {
                     HStack(spacing: 6) {
-                        Text("Đã chọn \(viewModel.selectedAssociatedItems.count) / \(viewModel.associatedItems.count) mục")
-                            .font(.subheadline.weight(.semibold))
+                        Text("Đã chọn \(viewModel.selectedAssociatedItems.count)/\(viewModel.associatedItems.count) mục")
+                            .font(.system(size: 12, weight: .medium).monospacedDigit())
                         if viewModel.selectedRequiresAdmin {
-                            Label("Cần xác thực Touch ID / Admin", systemImage: "touchid")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
+                            Text("· Cần xác thực quản trị viên")
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(.secondary)
                         }
                     }
                     Text(viewModel.removalMode == .moveToTrash
-                         ? "Mọi file sẽ được đóng gói gọn vào Thùng rác và có thể Hoàn tác 1 chạm."
-                         : "Cảnh báo: File xóa vĩnh viễn sẽ không đi qua Thùng rác và không thể khôi phục.")
-                        .font(.caption)
-                        .foregroundStyle(viewModel.removalMode == .moveToTrash ? Color.secondary : Color.red)
+                         ? "Chuyển gọn vào Thùng rác, hỗ trợ Hoàn tác 1 chạm."
+                         : "Xóa vĩnh viễn khỏi ổ đĩa và không thể hoàn tác.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
 
                 Spacer()
 
-                Button {
-                    viewModel.showUninstallConfirmation = true
-                } label: {
-                    HStack(spacing: 8) {
-                        if viewModel.isExecutingAction {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Image(systemName: viewModel.removalMode == .moveToTrash ? "trash.fill" : "xmark.bin.fill")
-                        }
-                        Text("\(viewModel.removalMode == .moveToTrash ? "Gỡ cài đặt" : "Xóa vĩnh viễn") (\(ByteFormatter.string(viewModel.selectedBytesToRemove)))")
-                            .fontWeight(.semibold)
+                if viewModel.removalMode == .permanentDelete {
+                    Button(role: .destructive) {
+                        viewModel.showUninstallConfirmation = true
+                    } label: {
+                        actionButtonLabel
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .controlSize(.regular)
+                    .disabled(viewModel.selectedAssociatedItems.isEmpty || viewModel.isExecutingAction)
+                } else {
+                    Button {
+                        viewModel.showUninstallConfirmation = true
+                    } label: {
+                        actionButtonLabel
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+                    .disabled(viewModel.selectedAssociatedItems.isEmpty || viewModel.isExecutingAction)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(viewModel.removalMode == .moveToTrash ? .red : .pink)
-                .controlSize(.large)
-                .disabled(viewModel.selectedAssociatedItems.isEmpty || viewModel.isExecutingAction)
             }
         }
         .padding(.horizontal, 20)
-        .padding(.vertical, 12)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .padding(.vertical, 11)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var actionButtonLabel: some View {
+        HStack(spacing: 6) {
+            if viewModel.isExecutingAction {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            Text("\(viewModel.removalMode == .moveToTrash ? "Chuyển vào Thùng rác" : "Xóa vĩnh viễn") (\(ByteFormatter.string(viewModel.selectedBytesToRemove)))")
+                .font(.system(size: 12.5, weight: .medium).monospacedDigit())
+        }
+        .padding(.horizontal, 6)
     }
 
     // MARK: - Confirmation Dialog Copy
 
     private var confirmDialogTitle: String {
         let removingApp = viewModel.selectedAssociatedItems.contains { $0.path == target.path }
-        if removingApp {
-            return "Xác nhận gỡ bỏ triệt để \(target.name)?"
-        } else {
-            return "Xác nhận dọn dữ liệu đã chọn của \(target.name)?"
-        }
+        return removingApp
+            ? "Gỡ cài đặt \(target.name)?"
+            : "Xóa dữ liệu đã chọn của \(target.name)?"
     }
 
     private var confirmPrimaryButtonLabel: String {
         let sizeText = ByteFormatter.string(viewModel.selectedBytesToRemove)
         return viewModel.removalMode == .moveToTrash
             ? "Chuyển vào Thùng rác (\(sizeText))"
-            : "Xóa vĩnh viễn ngay (\(sizeText))"
+            : "Xóa vĩnh viễn (\(sizeText))"
     }
 
     private var confirmDialogMessage: String {
         var parts: [String] = []
         if viewModel.isRunning(target) {
-            parts.append("• \(target.name) đang chạy và sẽ được đóng tự động trước khi gỡ.")
+            parts.append("\(target.name) đang mở và sẽ được đóng trước khi gỡ.")
         }
-        parts.append("• Sẽ xử lý \(viewModel.selectedAssociatedItems.count) mục (\(ByteFormatter.string(viewModel.selectedBytesToRemove))).")
+        parts.append("Tổng cộng \(viewModel.selectedAssociatedItems.count) mục (\(ByteFormatter.string(viewModel.selectedBytesToRemove))).")
         if viewModel.createZipBackup {
-            parts.append("• Tự động nén bản sao lưu .zip vào ~/Downloads/AppSweep Backups.")
+            parts.append("Tự động tạo bản sao lưu .zip trong ~/Downloads/AppSweep Backups.")
         }
         if viewModel.removalMode == .moveToTrash {
-            parts.append("• Có thể nhấn 'Hoàn tác' trong tab Lịch sử để khôi phục nguyên trạng về đúng thư mục gốc.")
+            parts.append("Bạn có thể khôi phục lại từ mục Lịch sử & Hoàn tác.")
         } else {
-            parts.append("• Hành động xóa vĩnh viễn KHÔNG THỂ hoàn tác.")
+            parts.append("Thao tác xóa vĩnh viễn không thể khôi phục.")
         }
         return parts.joined(separator: "\n")
     }
