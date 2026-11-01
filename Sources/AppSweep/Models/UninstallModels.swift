@@ -383,11 +383,15 @@ struct TargetBundle: Identifiable, Hashable, Sendable {
         return remMonths > 0 ? "\(years) năm \(remMonths) tháng trước" : "\(years) năm trước"
     }
 
-    private static func formatCount(_ n: Int) -> String {
+    private static let decimalFormatter: NumberFormatter = {
         let nf = NumberFormatter()
         nf.numberStyle = .decimal
         nf.groupingSeparator = "."
-        return nf.string(from: NSNumber(value: n)) ?? "\(n)"
+        return nf
+    }()
+
+    private static func formatCount(_ n: Int) -> String {
+        decimalFormatter.string(from: NSNumber(value: n)) ?? "\(n)"
     }
 
     private static let shortDateFormatter: DateFormatter = {
@@ -402,7 +406,7 @@ struct TargetBundle: Identifiable, Hashable, Sendable {
         let generic = Set(["com", "org", "net", "io", "app", "me", "dev", "co", "uk", "de", "jp", "vn"])
         if generic.contains(parts[0]), parts.count >= 2 {
             let vendor = parts[1]
-            let ambiguousVendors = Set(["github", "gitlab", " electron", "apple", "googlecode", "sourceforge"])
+            let ambiguousVendors = Set(["github", "gitlab", "electron", "apple", "googlecode", "sourceforge"])
             if ambiguousVendors.contains(vendor) || vendor.count < 3 {
                 return nil
             }
@@ -507,10 +511,7 @@ struct UninstallHistoryRecord: Codable, Identifiable, Hashable, Sendable {
 enum ByteFormatter {
     static func string(_ bytes: Int64) -> String {
         if bytes <= 0 { return "0 KB" }
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB, .useTB]
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: bytes)
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 }
 

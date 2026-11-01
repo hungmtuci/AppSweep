@@ -60,13 +60,25 @@ enum DeepFileScanner {
         "support", "manager", "tool", "tools", "utility", "utilities"
     ]
 
+    private static let cachedDarwinCacheDir: String? = resolveDarwinUserDir(_CS_DARWIN_USER_CACHE_DIR)
+    private static let cachedDarwinTempDir: String? = resolveDarwinUserDir(_CS_DARWIN_USER_TEMP_DIR)
+
+    private struct PendingCandidate {
+        let path: String
+        let name: String
+        let category: FileCategory
+        let confidence: MatchConfidence
+        let matchReason: String
+        let isDirectory: Bool
+        let isSelected: Bool
+    }
+
     static func scanAssociatedFiles(
         for target: TargetBundle,
         systemIndex: InstalledSystemIndex
     ) -> [AssociatedFileItem] {
-        let fm = FileManager.default
         let home = NSHomeDirectory()
-        var discovered: [String: AssociatedFileItem] = [:]
+        var pendingByPath: [String: PendingCandidate] = [:]
 
         func addCandidate(
             url: URL,
@@ -77,40 +89,35 @@ enum DeepFileScanner {
         ) {
             let standardized = url.standardizedFileURL.path
             guard !isBlockedSystemOrProtectedPath(standardized, target: target) else { return }
-            guard fm.fileExists(atPath: standardized) else { return }
 
-            // If an ancestor directory is already added (e.g. target.app itself), skip child paths inside target.app
+            var st = stat()
+            guard lstat(standardized, &st) == 0 else { return }
+
+            // Skip child paths inside target.app itself
             if standardized != target.path && standardized.hasPrefix(target.path + "/") {
                 return
             }
 
-            if let existing = discovered[standardized] {
-                // Keep higher confidence if already discovered
+            if let existing = pendingByPath[standardized] {
                 if existing.confidence == .exact || confidence != .exact {
                     return
                 }
             }
 
-            var isDir: ObjCBool = false
-            _ = fm.fileExists(atPath: standardized, isDirectory: &isDir)
-            let size = DiskSizeCalculator.allocatedSize(at: URL(fileURLWithPath: standardized))
-            let needsAdmin = DiskSizeCalculator.requiresAdminToModify(path: standardized)
+            let isDir = (st.st_mode & S_IFMT) == S_IFDIR
             let defaultSelected: Bool = {
                 if target.isSystemProtected { return false }
                 if let autoSelect { return autoSelect }
                 return confidence != .sharedVendor
             }()
 
-            discovered[standardized] = AssociatedFileItem(
-                id: standardized,
+            pendingByPath[standardized] = PendingCandidate(
                 path: standardized,
-                name: URL(fileURLWithPath: standardized).lastPathComponent,
+                name: (standardized as NSString).lastPathComponent,
                 category: category,
-                sizeBytes: size,
                 confidence: confidence,
                 matchReason: reason,
-                requiresAdmin: needsAdmin,
-                isDirectory: isDir.boolValue,
+                isDirectory: isDir,
                 isSelected: defaultSelected
             )
         }
@@ -128,10 +135,8 @@ enum DeepFileScanner {
         // Build identity signals
         let primaryID = target.bundleIdentifier.lowercased()
         var exactBundleIDs = Set<String>()
-        if !primaryID.isEmpty, !primaryID.hasPrefix("com.apple.") || !target.isSystemProtected {
-            if !primaryID.isEmpty {
-                exactBundleIDs.insert(primaryID)
-            }
+        if !primaryID.isEmpty, (!primaryID.hasPrefix("com.apple.") || !target.isSystemProtected) {
+            exactBundleIDs.insert(primaryID)
         }
         for child in target.childBundleIdentifiers {
             let lower = child.lowercased()
@@ -146,20 +151,17 @@ enum DeepFileScanner {
             }
         }
 
-        // Strong normalized name tokens (e.g., "spotify", "visualstudiocode", "googlechrome")
         let nameCandidates = buildSafeNameVariants(for: target)
         let vendorFolderToken = extractVendorNameToken(from: primaryID)
 
-        // Check whether other installed apps share the same TeamID or Vendor Prefix
         let hasSiblingTeamApps: Bool = {
             guard let team = target.teamIdentifier, !team.isEmpty else { return false }
             let paths = systemIndex.teamIDToAppPaths[team] ?? []
-            return paths.subtracting([target.path]).isEmpty == false
+            return !paths.subtracting([target.path]).isEmpty
         }()
 
         // 2. Scan Standard Directory Locations
         var scanSpecs: [(String, FileCategory, Bool)] = [
-            // (Directory Path, Category, AllowNameMatching)
             ("\(home)/Library/Application Support", .applicationSupport, true),
             ("/Library/Application Support", .applicationSupport, true),
             ("/Users/Shared", .applicationSupport, false),
@@ -179,10 +181,10 @@ enum DeepFileScanner {
             ("/Library/PrivilegedHelperTools", .launchDaemons, false)
         ]
 
-        if let darwinCache = darwinUserDir(_CS_DARWIN_USER_CACHE_DIR) {
+        if let darwinCache = cachedDarwinCacheDir {
             scanSpecs.append((darwinCache, .caches, false))
         }
-        if let darwinTemp = darwinUserDir(_CS_DARWIN_USER_TEMP_DIR) {
+        if let darwinTemp = cachedDarwinTempDir {
             scanSpecs.append((darwinTemp, .caches, false))
         }
 
@@ -201,14 +203,14 @@ enum DeepFileScanner {
             )
         }
 
-        // 3. Scan ~/Library/Containers (handles both Bundle-ID folders and macOS UUID container metadata!)
+        // 3. Scan ~/Library/Containers
         scanSandboxContainers(
             at: "\(home)/Library/Containers",
             exactBundleIDs: exactBundleIDs,
             addCandidate: addCandidate
         )
 
-        // 4. Scan ~/Library/Group Containers (handles group.<bundleID> AND <TeamID>.* with Sibling-App Guard!)
+        // 4. Scan ~/Library/Group Containers
         scanGroupContainers(
             at: "\(home)/Library/Group Containers",
             exactBundleIDs: exactBundleIDs,
@@ -218,7 +220,7 @@ enum DeepFileScanner {
             addCandidate: addCandidate
         )
 
-        // 5. Scan LaunchAgents & LaunchDaemons (matches filename AND inspects plist Program/Label/AssociatedBundleIdentifiers!)
+        // 5. Scan LaunchAgents & LaunchDaemons
         let launchDirs = [
             "\(home)/Library/LaunchAgents",
             "/Library/LaunchAgents",
@@ -266,7 +268,7 @@ enum DeepFileScanner {
             addCandidate: addCandidate
         )
 
-        // 9. Scan Companion Plugins / QuickLook / PreferencePanes / Services (if target is an .app)
+        // 9. Scan Companion Plugins / QuickLook / PreferencePanes / Services
         if target.kind == .application {
             let companionDirs = [
                 "\(home)/Library/PreferencePanes",
@@ -292,8 +294,51 @@ enum DeepFileScanner {
             }
         }
 
-        // Sort cleanly: Primary bundle first, then by category priority, then largest size first
-        return discovered.values.sorted { lhs, rhs in
+        // Prune nested child candidates if an ancestor directory is already matched (prevents double-counting bytes!)
+        let allPaths = Set(pendingByPath.keys)
+        let dedupedPending: [PendingCandidate] = pendingByPath.values.filter { candidate in
+            var parent = (candidate.path as NSString).deletingLastPathComponent
+            while parent.count > 1 && parent != "/" {
+                if allPaths.contains(parent) {
+                    return false
+                }
+                parent = (parent as NSString).deletingLastPathComponent
+            }
+            return true
+        }
+
+        guard !dedupedPending.isEmpty else { return [] }
+
+        // Compute allocated disk sizes & privilege requirements concurrently across CPU cores!
+        let lock = NSLock()
+        var finalized: [AssociatedFileItem] = []
+        finalized.reserveCapacity(dedupedPending.count)
+
+        DispatchQueue.concurrentPerform(iterations: dedupedPending.count) { idx in
+            if Task.isCancelled { return }
+            let item = dedupedPending[idx]
+            let size = DiskSizeCalculator.allocatedSize(atPath: item.path)
+            let needsAdmin = DiskSizeCalculator.requiresAdminToModify(path: item.path)
+
+            let built = AssociatedFileItem(
+                id: item.path,
+                path: item.path,
+                name: item.name,
+                category: item.category,
+                sizeBytes: size,
+                confidence: item.confidence,
+                matchReason: item.matchReason,
+                requiresAdmin: needsAdmin,
+                isDirectory: item.isDirectory,
+                isSelected: item.isSelected
+            )
+
+            lock.lock()
+            finalized.append(built)
+            lock.unlock()
+        }
+
+        return finalized.sorted { lhs, rhs in
             if lhs.category.sortPriority != rhs.category.sortPriority {
                 return lhs.category.sortPriority < rhs.category.sortPriority
             }
@@ -321,7 +366,7 @@ enum DeepFileScanner {
         let dirURL = URL(fileURLWithPath: dirPath)
         guard let entries = try? fm.contentsOfDirectory(
             at: dirURL,
-            includingPropertiesForKeys: [.isDirectoryKey],
+            includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ) else {
             return
@@ -331,13 +376,11 @@ enum DeepFileScanner {
             let itemName = entry.lastPathComponent
             let lowerName = itemName.lowercased()
 
-            // A. Match against exact Bundle IDs & Child Bundle IDs
             if let matchedID = matchBundleID(itemName: lowerName, exactBundleIDs: exactBundleIDs) {
                 addCandidate(entry, category, .exact, "Khớp Bundle ID (\(matchedID))", nil)
                 continue
             }
 
-            // B. Match against App Name Variants (when safe for this directory)
             if allowNameMatch, let matchedVariant = matchAppNameVariant(
                 itemName: itemName,
                 variants: nameVariants,
@@ -348,12 +391,11 @@ enum DeepFileScanner {
                 continue
             }
 
-            // C. Check 1-level nested Vendor Folder (e.g., ~/Library/Application Support/Google/Chrome)
             if allowNameMatch, let vendor = vendorToken,
                AppCatalogService.normalizeToken(itemName) == vendor {
                 if let subEntries = try? fm.contentsOfDirectory(
                     at: entry,
-                    includingPropertiesForKeys: [.isDirectoryKey],
+                    includingPropertiesForKeys: nil,
                     options: [.skipsHiddenFiles]
                 ) {
                     for sub in subEntries {
@@ -383,7 +425,7 @@ enum DeepFileScanner {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
             at: URL(fileURLWithPath: containersPath),
-            includingPropertiesForKeys: [.isDirectoryKey],
+            includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ) else { return }
 
@@ -394,10 +436,8 @@ enum DeepFileScanner {
                 continue
             }
 
-            // macOS Sonoma / Sequoia / Tahoe UUID container metadata check
             let metaURL = entry.appendingPathComponent(".com.apple.containermanagerd.metadata.plist")
-            if fm.fileExists(atPath: metaURL.path),
-               let dict = NSDictionary(contentsOf: metaURL) as? [String: Any],
+            if let dict = NSDictionary(contentsOf: metaURL) as? [String: Any],
                let metaID = (dict["MCMMetadataIdentifier"] as? String)?.lowercased() {
                 if exactBundleIDs.contains(metaID) || exactBundleIDs.contains(where: { metaID.hasPrefix($0 + ".") }) {
                     addCandidate(entry, .containers, .exact, "Sandbox Container Metadata (\(metaID))", nil)
@@ -417,7 +457,7 @@ enum DeepFileScanner {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
             at: URL(fileURLWithPath: groupContainersPath),
-            includingPropertiesForKeys: [.isDirectoryKey],
+            includingPropertiesForKeys: nil,
             options: [.skipsHiddenFiles]
         ) else { return }
 
@@ -427,7 +467,6 @@ enum DeepFileScanner {
             let name = entry.lastPathComponent
             let lower = name.lowercased()
 
-            // Direct bundleID match inside Group Container name (e.g. group.com.spotify.client or 2FNC3A47ZF.com.spotify.client)
             if let matchedID = exactBundleIDs.first(where: { id in
                 lower == id
                 || lower.hasPrefix(id + ".")
@@ -440,11 +479,11 @@ enum DeepFileScanner {
                 continue
             }
 
-            // TeamID prefix match (e.g. UBF8T346G9.ms or 2FNC3A47ZF.group...)
             if let lowerTeam, !lowerTeam.isEmpty, lower.hasPrefix(lowerTeam + ".") {
                 let suffix = String(lower.dropFirst(lowerTeam.count + 1))
+                let normSuffix = AppCatalogService.normalizeToken(suffix)
                 let mentionsThisApp = nameVariants.contains { variant in
-                    variant.normalized.count >= 4 && AppCatalogService.normalizeToken(suffix).contains(variant.normalized)
+                    variant.normalized.count >= 4 && normSuffix.contains(variant.normalized)
                 }
                 if mentionsThisApp || !hasSiblingTeamApps {
                     addCandidate(entry, .containers, .exact, "Team Group Container (\(teamID!))", true)
@@ -480,21 +519,22 @@ enum DeepFileScanner {
 
             if let matchedID = matchBundleID(itemName: stem, exactBundleIDs: exactBundleIDs) {
                 addCandidate(entry, .launchDaemons, .exact, "Launch plist (\(matchedID))", nil)
-                inspectHelperBinaryInLaunchPlist(entry, target: target, addCandidate: addCandidate)
+                if let dict = NSDictionary(contentsOf: entry) as? [String: Any] {
+                    inspectHelperBinaryInLaunchDict(dict, plistName: entry.lastPathComponent, addCandidate: addCandidate)
+                }
                 continue
             }
 
-            // Parse plist content to catch non-standard plist names pointing inside target.app or AssociatedBundleIdentifiers
+            // Parse plist content once
             guard let dict = NSDictionary(contentsOf: entry) as? [String: Any] else { continue }
 
             if let label = (dict["Label"] as? String)?.lowercased(),
                let matchedID = matchBundleID(itemName: label, exactBundleIDs: exactBundleIDs) {
                 addCandidate(entry, .launchDaemons, .exact, "Launch Label (\(matchedID))", nil)
-                inspectHelperBinaryInLaunchPlist(entry, target: target, addCandidate: addCandidate)
+                inspectHelperBinaryInLaunchDict(dict, plistName: entry.lastPathComponent, addCandidate: addCandidate)
                 continue
             }
 
-            // AssociatedBundleIdentifiers check (macOS 13+ Ventura/Sonoma/Tahoe background items)
             var assocIDs: [String] = []
             if let single = dict["AssociatedBundleIdentifiers"] as? String {
                 assocIDs.append(single.lowercased())
@@ -505,11 +545,10 @@ enum DeepFileScanner {
                 exactBundleIDs.contains(assoc) || exactBundleIDs.contains(where: { assoc.hasPrefix($0 + ".") })
             }) {
                 addCandidate(entry, .launchDaemons, .exact, "AssociatedBundleIdentifier (\(matchedAssoc))", nil)
-                inspectHelperBinaryInLaunchPlist(entry, target: target, addCandidate: addCandidate)
+                inspectHelperBinaryInLaunchDict(dict, plistName: entry.lastPathComponent, addCandidate: addCandidate)
                 continue
             }
 
-            // Program / ProgramArguments check pointing directly into target.path
             let programPath: String? = {
                 if let prog = dict["Program"] as? String { return prog }
                 if let args = dict["ProgramArguments"] as? [String], let first = args.first { return first }
@@ -521,10 +560,10 @@ enum DeepFileScanner {
                     addCandidate(entry, .launchDaemons, .exact, "Trỏ trực tiếp tới \(target.name)", nil)
                     continue
                 }
-                // Check if stem strongly matches uncommon app name AND program path mentions app name
+                let normStem = AppCatalogService.normalizeToken(stem)
+                let normProgram = AppCatalogService.normalizeToken(programPath)
                 if nameVariants.contains(where: { v in
-                    v.normalized.count >= 5 && AppCatalogService.normalizeToken(stem).contains(v.normalized)
-                    && AppCatalogService.normalizeToken(programPath).contains(v.normalized)
+                    v.normalized.count >= 5 && normStem.contains(v.normalized) && normProgram.contains(v.normalized)
                 }) {
                     addCandidate(entry, .launchDaemons, .strong, "LaunchAgent thực thi tiến trình của \(target.name)", nil)
                 }
@@ -532,27 +571,24 @@ enum DeepFileScanner {
         }
     }
 
-    private static func inspectHelperBinaryInLaunchPlist(
-        _ plistURL: URL,
-        target: TargetBundle,
+    private static func inspectHelperBinaryInLaunchDict(
+        _ dict: [String: Any],
+        plistName: String,
         addCandidate: (URL, FileCategory, MatchConfidence, String, Bool?) -> Void
     ) {
-        guard let dict = NSDictionary(contentsOf: plistURL) as? [String: Any] else { return }
         let programPath: String? = {
             if let prog = dict["Program"] as? String { return prog }
             if let args = dict["ProgramArguments"] as? [String], let first = args.first { return first }
             return nil
         }()
-        guard let programPath else { return }
-        if programPath.hasPrefix("/Library/PrivilegedHelperTools/") {
-            addCandidate(
-                URL(fileURLWithPath: programPath),
-                .launchDaemons,
-                .exact,
-                "Privileged Helper được khai báo trong \(plistURL.lastPathComponent)",
-                nil
-            )
-        }
+        guard let programPath, programPath.hasPrefix("/Library/PrivilegedHelperTools/") else { return }
+        addCandidate(
+            URL(fileURLWithPath: programPath),
+            .launchDaemons,
+            .exact,
+            "Privileged Helper được khai báo trong \(plistName)",
+            nil
+        )
     }
 
     private static func scanDiagnosticReports(
@@ -573,11 +609,9 @@ enum DeepFileScanner {
 
         for entry in entries {
             let lower = entry.lastPathComponent.lowercased()
-            if !execLower.isEmpty, execLower.count >= 3,
-               (lower.hasPrefix(execLower + "-") || lower.hasPrefix(execLower + "_")) {
+            if execLower.count >= 3, (lower.hasPrefix(execLower + "-") || lower.hasPrefix(execLower + "_")) {
                 addCandidate(entry, .logs, .exact, "Báo cáo lỗi Crash/IPS (\(target.executableName))", nil)
-            } else if !appLower.isEmpty, appLower.count >= 4,
-                      (lower.hasPrefix(appLower + "-") || lower.hasPrefix(appLower + "_")) {
+            } else if appLower.count >= 4, (lower.hasPrefix(appLower + "-") || lower.hasPrefix(appLower + "_")) {
                 addCandidate(entry, .logs, .strong, "Báo cáo lỗi Crash/IPS (\(target.name))", nil)
             } else if let matchedID = matchBundleID(itemName: lower, exactBundleIDs: exactBundleIDs) {
                 addCandidate(entry, .logs, .exact, "Báo cáo lỗi (\(matchedID))", nil)
@@ -646,29 +680,31 @@ enum DeepFileScanner {
             }
         }
 
-        // Exact ~/.<appname> dot-directory in Home (only for distinct names >= 4 chars, e.g. ~/.vscode, ~/.cursor, ~/.zed)
         var exactDotTokens = Set<String>()
         for v in nameVariants where v.normalized.count >= 4 {
             exactDotTokens.insert(v.normalized)
             exactDotTokens.insert(v.hyphenated)
         }
-        // Special well-known mappings (e.g. Visual Studio Code -> .vscode)
-        if target.bundleIdentifier.lowercased() == "com.microsoft.vscode" {
+        let lowerBID = target.bundleIdentifier.lowercased()
+        if lowerBID == "com.microsoft.vscode" {
             exactDotTokens.insert("vscode")
-        } else if target.bundleIdentifier.lowercased().hasPrefix("com.todesktop.") && target.name.lowercased() == "cursor" {
+        } else if lowerBID.hasPrefix("com.todesktop.") && target.name.lowercased() == "cursor" {
             exactDotTokens.insert("cursor")
         }
 
         for token in exactDotTokens where token.count >= 4 && !genericTokens.contains(token) {
             let dotPath = "\(home)/.\(token)"
-            if !protectedExactPaths.contains(dotPath), fm.fileExists(atPath: dotPath) {
-                addCandidate(
-                    URL(fileURLWithPath: dotPath),
-                    .receiptsAndConfig,
-                    .strong,
-                    "Thư mục cấu hình ẩn tại Home (~/. \(token))".replacingOccurrences(of: "~/. ", with: "~/."),
-                    nil
-                )
+            if !protectedExactPaths.contains(dotPath) {
+                var st = stat()
+                if lstat(dotPath, &st) == 0 {
+                    addCandidate(
+                        URL(fileURLWithPath: dotPath),
+                        .receiptsAndConfig,
+                        .strong,
+                        "Thư mục cấu hình ẩn tại Home (~/.@)".replacingOccurrences(of: "@", with: token),
+                        nil
+                    )
+                }
             }
         }
     }
@@ -690,8 +726,6 @@ enum DeepFileScanner {
             rawCandidates.append(target.executableName)
         }
 
-        // If app name starts with vendor name (e.g., "Google Chrome" -> also consider "Chrome" inside vendor contexts,
-        // or "Microsoft Edge" -> consider full name; keep single word only if distinct!)
         var seen = Set<String>()
         var variants: [NameVariant] = []
 
@@ -709,25 +743,34 @@ enum DeepFileScanner {
         return variants
     }
 
+    private static let removableFileSuffixes = [
+        ".savedstate", ".binarycookies", ".plist", ".bom",
+        ".sfl2", ".sfl3", ".lockfile"
+    ]
+
     private static func matchBundleID(itemName: String, exactBundleIDs: Set<String>) -> String? {
-        // Strip common plist/savedState/bom suffixes for cleaner exact matching
-        let suffixes = [
-            ".savedstate", ".binarycookies", ".plist", ".bom",
-            ".sfl2", ".sfl3", ".lockfile"
-        ]
-        var base = itemName.lowercased()
-        for suffix in suffixes where base.hasSuffix(suffix) {
+        guard !exactBundleIDs.isEmpty else { return nil }
+        var base = itemName
+        for suffix in removableFileSuffixes where base.hasSuffix(suffix) {
             base = String(base.dropLast(suffix.count))
             break
         }
 
+        if exactBundleIDs.contains(base) {
+            return base
+        }
         for id in exactBundleIDs {
-            if base == id || base.hasPrefix(id + ".") || base == "group.\(id)" || base.hasPrefix("group.\(id).") {
+            if base.hasPrefix(id + ".") || base == "group.\(id)" || base.hasPrefix("group.\(id).") {
                 return id
             }
         }
         return nil
     }
+
+    private static let knownStemExtensions: Set<String> = [
+        "plist", "savedstate", "caches", "log", "out", "err",
+        "prefpane", "qlgenerator", "saver", "plugin", "service"
+    ]
 
     private static func matchAppNameVariant(
         itemName: String,
@@ -736,14 +779,12 @@ enum DeepFileScanner {
         systemIndex: InstalledSystemIndex,
         requireExactOnly: Bool = false
     ) -> String? {
-        // Never treat reverse-DNS strings belonging to ANOTHER vendor/bundleID as a loose name match
+        guard !variants.isEmpty else { return nil }
         let lowerItem = itemName.lowercased()
         if lowerItem.hasPrefix("com.apple.") {
             return nil
         }
         if looksLikeBundleID(lowerItem) {
-            // If it looks like com.something.else, only match if its last segment equals a distinct >=5 char variant
-            // AND it is NOT a known installed bundle ID of another app!
             if systemIndex.allKnownBundleIDs.contains(lowerItem),
                lowerItem != target.bundleIdentifier.lowercased() {
                 return nil
@@ -751,10 +792,9 @@ enum DeepFileScanner {
         }
 
         let cleanStem: String = {
-            let url = URL(fileURLWithPath: itemName)
-            let knownExts: Set<String> = ["plist", "savedstate", "caches", "log", "out", "err", "prefpane", "qlgenerator", "saver", "plugin", "service"]
-            if knownExts.contains(url.pathExtension.lowercased()) {
-                return url.deletingPathExtension().lastPathComponent
+            let ext = (itemName as NSString).pathExtension.lowercased()
+            if !ext.isEmpty && knownStemExtensions.contains(ext) {
+                return (itemName as NSString).deletingPathExtension
             }
             return itemName
         }()
@@ -764,7 +804,6 @@ enum DeepFileScanner {
         let itemWords = splitIntoWords(cleanStem)
 
         for variant in variants {
-            // 1. Exact normalized match (works safely even for 3-letter apps like VLC, Arc, OBS, Zed!)
             if itemNorm == variant.normalized {
                 return variant.raw
             }
@@ -773,12 +812,9 @@ enum DeepFileScanner {
                 continue
             }
 
-            // 2. Word-boundary prefix match (e.g., variant = ["visual", "studio", "code"] or ["spotify"],
-            //    itemWords = ["spotify", "client"] or ["spotify", "updater"])
-            //    Guard: Ensure `itemNorm` is NOT the exact name of ANOTHER installed app (e.g., "Telegram Lite" vs "Telegram"!)
             if itemWords.count > variant.words.count,
                !variant.words.isEmpty,
-               Array(itemWords.prefix(variant.words.count)) == variant.words {
+               itemWords.starts(with: variant.words) {
                 if systemIndex.allKnownAppNamesNormalized.contains(itemNorm) && itemNorm != variant.normalized {
                     continue
                 }
@@ -799,17 +835,20 @@ enum DeepFileScanner {
         return vendor
     }
 
+    private static let reverseDNSTokens: Set<Substring> = [
+        "com", "org", "net", "io", "app", "dev", "me", "edu", "gov", "group"
+    ]
+
     private static func looksLikeBundleID(_ str: String) -> Bool {
         let parts = str.split(separator: ".")
         guard parts.count >= 3 else { return false }
-        let prefixes: Set<Substring> = ["com", "org", "net", "io", "app", "dev", "me", "edu", "gov", "group"]
-        return prefixes.contains(parts[0])
+        return reverseDNSTokens.contains(parts[0])
     }
 
     /// Splits camelCase, spaces, dots, hyphens, and underscores into lowercase alphanumeric tokens.
     static func splitIntoWords(_ text: String) -> [String] {
-        // Insert space between lowercase->Uppercase transitions (e.g. "BarFlow" -> "Bar Flow", "VSCode" -> "VS Code")
         var separated = ""
+        separated.reserveCapacity(text.count + 4)
         let chars = Array(text)
         for i in chars.indices {
             let c = chars[i]
@@ -827,8 +866,7 @@ enum DeepFileScanner {
         let folded = separated.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         return folded
             .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .map { $0.lowercased() }
-            .filter { !$0.isEmpty }
+            .compactMap { $0.isEmpty ? nil : $0.lowercased() }
     }
 
     private static func isBlockedSystemOrProtectedPath(_ path: String, target: TargetBundle) -> Bool {
@@ -839,7 +877,7 @@ enum DeepFileScanner {
             if path.hasPrefix("/System/") || path.hasPrefix("/usr/") || path.hasPrefix("/bin/") || path.hasPrefix("/sbin/") {
                 return true
             }
-            let lowerName = URL(fileURLWithPath: path).lastPathComponent.lowercased()
+            let lowerName = (path as NSString).lastPathComponent.lowercased()
             if lowerName.hasPrefix("com.apple.") && !target.bundleIdentifier.lowercased().hasPrefix("com.apple.") {
                 return true
             }
@@ -847,7 +885,7 @@ enum DeepFileScanner {
         return false
     }
 
-    private static func darwinUserDir(_ name: Int32) -> String? {
+    private static func resolveDarwinUserDir(_ name: Int32) -> String? {
         var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
         let len = confstr(name, &buffer, buffer.count)
         guard len > 0 else { return nil }

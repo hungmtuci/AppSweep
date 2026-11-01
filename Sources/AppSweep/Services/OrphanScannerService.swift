@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 enum OrphanScannerService {
@@ -17,38 +18,84 @@ enum OrphanScannerService {
         "com", "org", "net", "io", "app", "dev", "me", "co", "uk", "de", "fr", "jp", "kr", "cn", "vn", "pro", "studio", "tech", "ai", "so", "sh"
     ]
 
+    private static let sharedHelperKeywords = [
+        "keystone", "autoupdate", "updater", "licensing", "ipc", "shared", "oneauth", "crashreporter"
+    ]
+
+    private struct PendingOrphan {
+        let path: String
+        let name: String
+        let inferredIdentifier: String
+        let category: FileCategory
+        let reason: String
+        let modifiedDate: Date?
+    }
+
     static func scanOrphans(systemIndex: InstalledSystemIndex) -> [OrphanItem] {
         let fm = FileManager.default
         let home = NSHomeDirectory()
         let ownBundleID = (Bundle.main.bundleIdentifier ?? "com.hunglx.AppSweep").lowercased()
 
-        // Also index running processes' bundle IDs so active background tools are never flagged
         let runningBundleIDs: Set<String> = Set(
             NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier?.lowercased() }
         )
 
-        var results: [String: OrphanItem] = [:]
+        // Pre-index all segment prefixes of installed bundle IDs so parent/child matching is O(1) instead of O(M)
+        var installedParentSegments = Set<String>()
+        for known in systemIndex.allKnownBundleIDs {
+            let parts = known.split(separator: ".")
+            if parts.count >= 3 {
+                var acc = "\(parts[0]).\(parts[1]).\(parts[2])"
+                installedParentSegments.insert(acc)
+                for idx in 3..<parts.count {
+                    acc.append(".")
+                    acc.append(contentsOf: parts[idx])
+                    installedParentSegments.insert(acc)
+                }
+            }
+        }
+
+        var installedMemo: [String: Bool] = [:]
 
         func isBundleIDInstalledAnywhere(_ rawCandidate: String) -> Bool {
             let candidate = rawCandidate.lowercased()
+            if let cached = installedMemo[candidate] {
+                return cached
+            }
+
+            let installed = computeIsInstalled(candidate)
+            installedMemo[candidate] = installed
+            return installed
+        }
+
+        func computeIsInstalled(_ candidate: String) -> Bool {
             if candidate.isEmpty || candidate == ownBundleID { return true }
             for prefix in ignoredPrefixes where candidate.hasPrefix(prefix) {
                 return true
             }
-            if runningBundleIDs.contains(candidate) {
+            if runningBundleIDs.contains(candidate) || systemIndex.allKnownBundleIDs.contains(candidate) {
                 return true
             }
-            if systemIndex.allKnownBundleIDs.contains(candidate) {
+            if installedParentSegments.contains(candidate) {
                 return true
             }
-            // Check parent/child bundle ID relation (e.g., com.spotify.client.helper <-> com.spotify.client)
-            for known in systemIndex.allKnownBundleIDs {
-                if candidate.hasPrefix(known + ".") || known.hasPrefix(candidate + ".") {
+
+            // O(k) check whether any prefix of `candidate` (>= 3 segments) is an installed app bundle ID
+            let parts = candidate.split(separator: ".")
+            if parts.count >= 3 {
+                var prefixAcc = "\(parts[0]).\(parts[1]).\(parts[2])"
+                if systemIndex.allKnownBundleIDs.contains(prefixAcc) || runningBundleIDs.contains(prefixAcc) {
                     return true
+                }
+                for idx in 3..<parts.count {
+                    prefixAcc.append(".")
+                    prefixAcc.append(contentsOf: parts[idx])
+                    if systemIndex.allKnownBundleIDs.contains(prefixAcc) || runningBundleIDs.contains(prefixAcc) {
+                        return true
+                    }
                 }
             }
 
-            // Query macOS LaunchServices for apps located outside /Applications (e.g., developer workspace folders)
             let strippedIDs = candidateBundleIDForms(from: candidate)
             for idForm in strippedIDs {
                 if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: idForm) {
@@ -59,12 +106,8 @@ enum OrphanScannerService {
                 }
             }
 
-            // Check if vendor prefix belongs to an installed suite (e.g. Adobe, Microsoft, Google, JetBrains)
-            // for shared suite plists like com.microsoft.autoupdate2 or com.google.Keystone
-            let parts = candidate.split(separator: ".").map(String.init)
             if parts.count >= 2 {
                 let vendorPrefix = "\(parts[0]).\(parts[1])"
-                let sharedHelperKeywords = ["keystone", "autoupdate", "updater", "licensing", "ipc", "shared", "oneauth", "crashreporter"]
                 if systemIndex.vendorPrefixToAppPaths[vendorPrefix]?.isEmpty == false,
                    sharedHelperKeywords.contains(where: { candidate.contains($0) }) {
                     return true
@@ -74,7 +117,9 @@ enum OrphanScannerService {
             return false
         }
 
-        // 1. Scan Broken LaunchAgents & LaunchDaemons (100% deterministic check on missing target executable)
+        var pendingByPath: [String: PendingOrphan] = [:]
+
+        // 1. Scan Broken LaunchAgents & LaunchDaemons
         let launchLocations = [
             "\(home)/Library/LaunchAgents",
             "/Library/LaunchAgents",
@@ -107,19 +152,14 @@ enum OrphanScannerService {
                    !program.hasPrefix("/System/"),
                    !fm.fileExists(atPath: program) {
                     let canonical = item.standardizedFileURL.path
-                    let size = DiskSizeCalculator.allocatedSize(at: item)
                     let modDate = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                    results[canonical] = OrphanItem(
-                        id: canonical,
+                    pendingByPath[canonical] = PendingOrphan(
                         path: canonical,
                         name: fileName,
                         inferredIdentifier: stem,
                         category: .launchDaemons,
-                        sizeBytes: size,
                         reason: "Tiến trình đích không còn tồn tại (\(PathFormatter.prettyPath(program)))",
-                        requiresAdmin: DiskSizeCalculator.requiresAdminToModify(path: canonical),
-                        modifiedDate: modDate,
-                        isSelected: true
+                        modifiedDate: modDate
                     )
                 }
             }
@@ -147,34 +187,57 @@ enum OrphanScannerService {
             for item in items {
                 if Task.isCancelled { break }
                 let canonical = item.standardizedFileURL.path
-                if results[canonical] != nil { continue }
+                if pendingByPath[canonical] != nil { continue }
 
-                let extractedID = extractBundleIdentifier(for: item, inCategory: category)
-                guard let bundleID = extractedID else { continue }
+                guard let bundleID = extractBundleIdentifier(for: item, inCategory: category) else { continue }
 
                 if !isBundleIDInstalledAnywhere(bundleID) {
-                    let size = DiskSizeCalculator.allocatedSize(at: item)
-                    // Skip 0-byte empty preference stubs
-                    if category == .preferences && size == 0 { continue }
-
                     let modDate = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                    results[canonical] = OrphanItem(
-                        id: canonical,
+                    pendingByPath[canonical] = PendingOrphan(
                         path: canonical,
                         name: item.lastPathComponent,
                         inferredIdentifier: bundleID,
                         category: category,
-                        sizeBytes: size,
                         reason: "Không còn ứng dụng nào khớp Bundle ID (\(bundleID))",
-                        requiresAdmin: DiskSizeCalculator.requiresAdminToModify(path: canonical),
-                        modifiedDate: modDate,
-                        isSelected: true
+                        modifiedDate: modDate
                     )
                 }
             }
         }
 
-        return results.values.sorted { lhs, rhs in
+        let pendingList = Array(pendingByPath.values)
+        guard !pendingList.isEmpty else { return [] }
+
+        // 3. Parallel size & permission computation via fast POSIX fts_open
+        let lock = NSLock()
+        var builtResults: [OrphanItem] = []
+        builtResults.reserveCapacity(pendingList.count)
+
+        DispatchQueue.concurrentPerform(iterations: pendingList.count) { idx in
+            if Task.isCancelled { return }
+            let p = pendingList[idx]
+            let size = DiskSizeCalculator.allocatedSize(atPath: p.path)
+            if p.category == .preferences && size == 0 {
+                return
+            }
+            let item = OrphanItem(
+                id: p.path,
+                path: p.path,
+                name: p.name,
+                inferredIdentifier: p.inferredIdentifier,
+                category: p.category,
+                sizeBytes: size,
+                reason: p.reason,
+                requiresAdmin: DiskSizeCalculator.requiresAdminToModify(path: p.path),
+                modifiedDate: p.modifiedDate,
+                isSelected: true
+            )
+            lock.lock()
+            builtResults.append(item)
+            lock.unlock()
+        }
+
+        return builtResults.sorted { lhs, rhs in
             if lhs.category == .launchDaemons && rhs.category != .launchDaemons { return true }
             if lhs.category != .launchDaemons && rhs.category == .launchDaemons { return false }
             if lhs.sizeBytes != rhs.sizeBytes { return lhs.sizeBytes > rhs.sizeBytes }
@@ -182,8 +245,9 @@ enum OrphanScannerService {
         }
     }
 
+    private static let removableSuffixes = [".savedState", ".savedstate", ".binarycookies", ".plist"]
+
     private static func extractBundleIdentifier(for itemURL: URL, inCategory category: FileCategory) -> String? {
-        // For ~/Library/Containers on modern macOS, check metadata plist first if UUID folder
         if category == .containers {
             let metaPlist = itemURL.appendingPathComponent(".com.apple.containermanagerd.metadata.plist")
             if let dict = NSDictionary(contentsOf: metaPlist) as? [String: Any],
@@ -194,7 +258,6 @@ enum OrphanScannerService {
         }
 
         var raw = itemURL.lastPathComponent
-        let removableSuffixes = [".savedState", ".savedstate", ".binarycookies", ".plist"]
         for suffix in removableSuffixes where raw.hasSuffix(suffix) {
             raw = String(raw.dropLast(suffix.count))
             break
@@ -209,21 +272,20 @@ enum OrphanScannerService {
         for prefix in ignoredPrefixes where lower.hasPrefix(prefix) {
             return false
         }
-        let parts = lower.split(separator: ".").map(String.init)
+        let parts = lower.split(separator: ".")
         guard parts.count >= 3 else { return false }
-        guard validReverseDNSPrefixes.contains(parts[0]) else { return false }
-        // Reject lockfiles or UUID suffixes in ByHost
+        guard validReverseDNSPrefixes.contains(String(parts[0])) else { return false }
         if parts.last == "lockfile" { return false }
         return parts.allSatisfy { !$0.isEmpty && !$0.contains(" ") }
     }
 
+    private static let helperSuffixes = [
+        ".helper", ".shipit", ".loginhelper", ".launcher", ".updater",
+        ".renderer", ".gpu", ".plugin", ".agent", ".daemon", ".xpc"
+    ]
+
     private static func candidateBundleIDForms(from candidate: String) -> [String] {
         var forms = [candidate]
-        // Also strip trailing helper suffixes like .helper, .ShipIt, .Renderer, .LoginHelper
-        let helperSuffixes = [
-            ".helper", ".shipit", ".loginhelper", ".launcher", ".updater",
-            ".renderer", ".gpu", ".plugin", ".agent", ".daemon", ".xpc"
-        ]
         for suffix in helperSuffixes where candidate.hasSuffix(suffix) {
             let parent = String(candidate.dropLast(suffix.count))
             if parent.split(separator: ".").count >= 3 {

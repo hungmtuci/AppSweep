@@ -145,7 +145,7 @@ struct OrphansCleanerView: View {
             Divider()
 
             ScrollView {
-                VStack(spacing: 0) {
+                LazyVStack(spacing: 0) {
                     ForEach(Array(viewModel.filteredOrphans.enumerated()), id: \.element.id) { idx, item in
                         orphanRow(item)
                         if idx < viewModel.filteredOrphans.count - 1 {

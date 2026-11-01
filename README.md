@@ -58,8 +58,8 @@
 ## 📥 Tải về & Cài đặt nhanh (macOS 14.0+ Universal: Apple Silicon & Intel)
 
 1. Tải bộ cài mới nhất tại trang **[Releases](https://github.com/hungmtuci/AppSweep/releases/latest)**:
-   - **`AppSweep-Installer-v1.3.0.dmg`** *(Khuyên dùng)*
-   - Hoặc **`AppSweep-v1.3.0-macOS.zip`**
+   - **`AppSweep-Installer-v1.3.1.dmg`** *(Khuyên dùng)*
+   - Hoặc **`AppSweep-v1.3.1-macOS.zip`**
 2. Mở file `.dmg`:
    - Kéo `AppSweep.app` thả vào thư mục **`Applications`**, **HOẶC** nhấp chuột phải vào `Cai_Dat_AppSweep.command` → chọn **Open** để tự động cài đặt vào `/Applications` và gỡ cờ cách ly Gatekeeper.
 3. Nếu macOS báo ứng dụng chưa công chứng Apple Developer ID khi mở lần đầu trên máy mới, chạy lệnh sau trong Terminal:

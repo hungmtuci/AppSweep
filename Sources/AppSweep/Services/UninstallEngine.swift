@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 struct UninstallExecutionResult: Sendable {
@@ -47,20 +48,28 @@ enum UninstallEngine {
         return URL(fileURLWithPath: appSupport).appendingPathComponent("uninstall_history.json")
     }
 
+    private static let sharedDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+
+    private static let sharedEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }()
+
     // MARK: - History Persistence
 
     static func loadHistory() -> [UninstallHistoryRecord] {
         guard let data = try? Data(contentsOf: historyFileURL) else { return [] }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return (try? decoder.decode([UninstallHistoryRecord].self, from: data)) ?? []
+        return (try? sharedDecoder.decode([UninstallHistoryRecord].self, from: data)) ?? []
     }
 
     static func saveHistory(_ records: [UninstallHistoryRecord]) {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        if let data = try? encoder.encode(records) {
+        if let data = try? sharedEncoder.encode(records) {
             try? data.write(to: historyFileURL, options: .atomic)
         }
     }
@@ -93,22 +102,42 @@ enum UninstallEngine {
     }
 
     static func terminateTargetProcesses(_ target: TargetBundle) {
-        let lowerPrimary = target.bundleIdentifier.lowercased()
-        let lowerChildren = Set(target.childBundleIdentifiers.map { $0.lowercased() })
-        let targetPath = target.path
+        terminateMultipleTargets([target])
+    }
 
+    static func terminateMultipleTargets(_ targets: [TargetBundle]) {
+        guard !targets.isEmpty else { return }
+
+        var allBundleIDs = Set<String>()
+        var allPaths: [String] = []
+        allPaths.reserveCapacity(targets.count)
+
+        for target in targets {
+            let lowerPrimary = target.bundleIdentifier.lowercased()
+            if !lowerPrimary.isEmpty {
+                allBundleIDs.insert(lowerPrimary)
+            }
+            for child in target.childBundleIdentifiers {
+                let lowerChild = child.lowercased()
+                if !lowerChild.isEmpty {
+                    allBundleIDs.insert(lowerChild)
+                }
+            }
+            allPaths.append(target.path)
+        }
+
+        let ownPID = ProcessInfo.processInfo.processIdentifier
         let matchedApps = NSWorkspace.shared.runningApplications.filter { app in
-            if app.processIdentifier == ProcessInfo.processInfo.processIdentifier { return false }
-            if let bid = app.bundleIdentifier?.lowercased() {
-                if !lowerPrimary.isEmpty && bid == lowerPrimary { return true }
-                if lowerChildren.contains(bid) { return true }
+            if app.processIdentifier == ownPID { return false }
+            if let bid = app.bundleIdentifier?.lowercased(), allBundleIDs.contains(bid) {
+                return true
             }
             if let bundlePath = app.bundleURL?.standardizedFileURL.path,
-               (bundlePath == targetPath || bundlePath.hasPrefix(targetPath + "/")) {
+               allPaths.contains(where: { bundlePath == $0 || bundlePath.hasPrefix($0 + "/") }) {
                 return true
             }
             if let execPath = app.executableURL?.standardizedFileURL.path,
-               execPath.hasPrefix(targetPath + "/") {
+               allPaths.contains(where: { execPath.hasPrefix($0 + "/") }) {
                 return true
             }
             return false
@@ -120,11 +149,11 @@ enum UninstallEngine {
             _ = app.terminate()
         }
 
-        // Wait up to 900ms for graceful quit before force-terminating
+        // Wait up to 900ms total across the entire batch for graceful quit before force-terminating
         let deadline = Date().addingTimeInterval(0.9)
         while Date() < deadline {
             if matchedApps.allSatisfy({ $0.isTerminated }) { break }
-            Thread.sleep(forTimeInterval: 0.1)
+            Thread.sleep(forTimeInterval: 0.08)
         }
 
         for app in matchedApps where !app.isTerminated {
@@ -139,7 +168,9 @@ enum UninstallEngine {
         items: [AssociatedFileItem],
         mode: RemovalMode,
         createZipBackup: Bool,
-        cleanDockIcon: Bool
+        cleanDockIcon: Bool,
+        customRecordTitle: String? = nil,
+        customBundleID: String? = nil
     ) throws -> UninstallExecutionResult {
         let selectedItems = items.filter(\.isSelected)
         guard !selectedItems.isEmpty else {
@@ -155,8 +186,8 @@ enum UninstallEngine {
             terminateTargetProcesses(target)
         }
 
-        let targetName = target?.name ?? selectedItems.first?.name ?? " Dọn dẹp"
-        let bundleID = target?.bundleIdentifier ?? ""
+        let targetName = customRecordTitle ?? target?.name ?? selectedItems.first?.name ?? "Dọn dẹp"
+        let bundleID = customBundleID ?? target?.bundleIdentifier ?? ""
 
         // 2. Optional ZIP Backup before deleting (AppDelete Archive feature)
         var archiveZipPath: String? = nil
@@ -306,10 +337,7 @@ enum UninstallEngine {
         // Write manifest inside Trash folder too for transparency
         if let trashContainerPath, !entries.isEmpty {
             let manifestURL = URL(fileURLWithPath: trashContainerPath).appendingPathComponent("restore_manifest.json")
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted]
-            encoder.dateEncodingStrategy = .iso8601
-            if let data = try? encoder.encode(record) {
+            if let data = try? sharedEncoder.encode(record) {
                 try? data.write(to: manifestURL)
             }
         } else if let trashContainerPath, entries.isEmpty {
@@ -345,10 +373,8 @@ enum UninstallEngine {
         let gid = getgid()
         let timestampStr = Self.folderTimestampFormatter.string(from: Date())
 
-        // 1. Terminate all running processes across all selected apps first
-        for payload in validBatches {
-            terminateTargetProcesses(payload.target)
-        }
+        // 1. Terminate all running processes across all selected apps in a single pass
+        terminateMultipleTargets(validBatches.map(\.target))
 
         // Per-target mutable state before finalizing history records
         struct WorkingBatchState {
@@ -501,9 +527,6 @@ enum UninstallEngine {
 
         // 6. Finalize per-app UninstallHistoryRecord entries & persist
         var createdRecords: [UninstallHistoryRecord] = []
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted]
-        encoder.dateEncodingStrategy = .iso8601
 
         for st in states {
             if st.entries.isEmpty {
@@ -529,7 +552,7 @@ enum UninstallEngine {
                 isFullyRestored: false
             )
 
-            if let trashDir = st.trashContainerPath, let data = try? encoder.encode(rec) {
+            if let trashDir = st.trashContainerPath, let data = try? sharedEncoder.encode(rec) {
                 let manifestURL = URL(fileURLWithPath: trashDir).appendingPathComponent("restore_manifest.json")
                 try? data.write(to: manifestURL)
             }
@@ -561,8 +584,11 @@ enum UninstallEngine {
         orphans: [OrphanItem],
         mode: RemovalMode
     ) throws -> UninstallHistoryRecord {
-        let mapped: [AssociatedFileItem] = orphans.filter(\.isSelected).map { orphan in
-            AssociatedFileItem(
+        let selected = orphans.filter(\.isSelected)
+        let mapped: [AssociatedFileItem] = selected.map { orphan in
+            var st = stat()
+            let isDir = (lstat(orphan.path, &st) == 0) && ((st.st_mode & S_IFMT) == S_IFDIR)
+            return AssociatedFileItem(
                 id: orphan.id,
                 path: orphan.path,
                 name: orphan.name,
@@ -571,41 +597,21 @@ enum UninstallEngine {
                 confidence: .exact,
                 matchReason: orphan.reason,
                 requiresAdmin: orphan.requiresAdmin,
-                isDirectory: true,
+                isDirectory: isDir,
                 isSelected: true
             )
         }
 
-        let syntheticResult = try performUninstall(
+        let result = try performUninstall(
             target: nil,
             items: mapped,
             mode: mode,
             createZipBackup: false,
-            cleanDockIcon: false
+            cleanDockIcon: false,
+            customRecordTitle: "Dọn \(selected.count) file rác mồ côi",
+            customBundleID: "orphans.cleanup"
         )
-
-        // Rename synthetic targetName nicely in history
-        var history = loadHistory()
-        if let idx = history.firstIndex(where: { $0.id == syntheticResult.record.id }) {
-            let updated = UninstallHistoryRecord(
-                id: syntheticResult.record.id,
-                timestamp: syntheticResult.record.timestamp,
-                targetName: "Dọn \(syntheticResult.record.removedCount) file rác mồ côi",
-                bundleIdentifier: "orphans.cleanup",
-                mode: syntheticResult.record.mode,
-                totalBytesFreed: syntheticResult.record.totalBytesFreed,
-                removedCount: syntheticResult.record.removedCount,
-                failedPaths: syntheticResult.record.failedPaths,
-                trashContainerPath: syntheticResult.record.trashContainerPath,
-                archiveZipPath: nil,
-                entries: syntheticResult.record.entries,
-                isFullyRestored: false
-            )
-            history[idx] = updated
-            saveHistory(history)
-            return updated
-        }
-        return syntheticResult.record
+        return result.record
     }
 
     // MARK: - 1-Click Undo / Restore from Trash (AppDelete Undo feature)
@@ -721,9 +727,10 @@ enum UninstallEngine {
     }
 
     private static func removeAppsFromDockIfPresent(appPaths: [String]) -> Bool {
-        let dockPlistPath = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Preferences/com.apple.dock.plist")
-        guard let dict = NSMutableDictionary(contentsOfFile: dockPlistPath),
-              let persistentApps = dict["persistent-apps"] as? [[String: Any]] else {
+        let dockDomain = "com.apple.dock" as CFString
+        let appsKey = "persistent-apps" as CFString
+
+        guard let persistentApps = CFPreferencesCopyAppValue(appsKey, dockDomain) as? [[String: Any]] else {
             return false
         }
 
@@ -751,8 +758,8 @@ enum UninstallEngine {
         }
 
         guard removedAny else { return false }
-        dict["persistent-apps"] = filtered
-        if dict.write(toFile: dockPlistPath, atomically: true) {
+        CFPreferencesSetAppValue(appsKey, filtered as CFArray, dockDomain)
+        if CFPreferencesAppSynchronize(dockDomain) {
             runQuietProcess("/usr/bin/killall", arguments: ["Dock"])
             return true
         }
@@ -800,8 +807,8 @@ enum UninstallEngine {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: launchPath)
         proc.arguments = arguments
-        proc.standardOutput = Pipe()
-        proc.standardError = Pipe()
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
         do {
             try proc.run()
             proc.waitUntilExit()

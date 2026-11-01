@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct BannerToast: Identifiable, Equatable {
     let id = UUID()
@@ -19,11 +20,24 @@ final class MainViewModel: ObservableObject {
     @Published var activeSection: NavigationSection = .apps
     @Published var hasFullDiskAccess: Bool = PermissionService.hasFullDiskAccess()
 
-    // Catalogs
-    @Published var installedApps: [TargetBundle] = []
-    @Published var addons: [TargetBundle] = []
-    @Published var orphans: [OrphanItem] = []
+    // Raw Catalogs
+    @Published var installedApps: [TargetBundle] = [] {
+        didSet { if !isSuppressingDerivedRebuild { rebuildAppCatalogDerivedState() } }
+    }
+    @Published var addons: [TargetBundle] = [] {
+        didSet { if !isSuppressingDerivedRebuild { rebuildAddonsDerivedState() } }
+    }
+    @Published var orphans: [OrphanItem] = [] {
+        didSet { rebuildOrphansDerivedState() }
+    }
     @Published var historyRecords: [UninstallHistoryRecord] = []
+
+    // Memoized Derived Collections (O(1) reads during SwiftUI rendering)
+    @Published private(set) var filteredApps: [TargetBundle] = []
+    @Published private(set) var filteredAppsTotalBytes: Int64 = 0
+    @Published private(set) var usageFilterCounts: [AppUsageFilter: Int] = [:]
+    @Published private(set) var filteredAddons: [TargetBundle] = []
+    @Published private(set) var filteredOrphans: [OrphanItem] = []
 
     // Loading Indicators
     @Published var isLoadingCatalog: Bool = false
@@ -33,12 +47,27 @@ final class MainViewModel: ObservableObject {
     @Published var isExecutingAction: Bool = false
 
     // Filtering & Sorting
-    @Published var searchQuery: String = ""
-    @Published var sortOrder: AppSortOrder = .nameAsc
-    @Published var filterScope: AppFilterScope = .all
-    @Published var usageFilter: AppUsageFilter = .all
-    @Published var addonFilterKind: BundleKind? = nil
-    @Published var orphanSearchQuery: String = ""
+    @Published var searchQuery: String = "" {
+        didSet {
+            rebuildAppCatalogDerivedState()
+            rebuildAddonsDerivedState()
+        }
+    }
+    @Published var sortOrder: AppSortOrder = .nameAsc {
+        didSet { rebuildAppCatalogDerivedState() }
+    }
+    @Published var filterScope: AppFilterScope = .all {
+        didSet { rebuildAppCatalogDerivedState() }
+    }
+    @Published var usageFilter: AppUsageFilter = .all {
+        didSet { rebuildAppCatalogDerivedState() }
+    }
+    @Published var addonFilterKind: BundleKind? = nil {
+        didSet { rebuildAddonsDerivedState() }
+    }
+    @Published var orphanSearchQuery: String = "" {
+        didSet { rebuildOrphansDerivedState() }
+    }
 
     // Selected Target & Deep Scan Results
     @Published var selectedTarget: TargetBundle? = nil
@@ -67,6 +96,7 @@ final class MainViewModel: ObservableObject {
     @Published var isDropZoneTargeted: Bool = false
     @Published var expandedHistoryRecordIDs: Set<UUID> = []
 
+    private var isSuppressingDerivedRebuild: Bool = false
     private var lastAnchorPathForRangeSelect: String? = nil
 
     private var systemIndex = InstalledSystemIndex(
@@ -77,12 +107,23 @@ final class MainViewModel: ObservableObject {
         vendorPrefixToAppPaths: [:]
     )
 
-    private var iconCache: [String: NSImage] = [:]
+    private let iconCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 400
+        return cache
+    }()
+
+    private static let genericFileIconExtensions: Set<String> = [
+        "plist", "bom", "log", "ips", "diag", "crash", "out", "err", "json", "txt", "db", "sqlite", "binarycookies", "sfl2", "sfl3"
+    ]
+
     private var scanTargetTask: Task<Void, Never>?
     private var sizeCalcTask: Task<Void, Never>?
+    private var batchScanCoordinatorTask: Task<Void, Never>?
+    private var queuedBatchBundles: [String: TargetBundle] = [:]
     private var orphanScanTask: Task<Void, Never>?
     private var toastDismissTask: Task<Void, Never>?
-    private var runningPIDsRefreshTimer: Timer?
+
     @Published private(set) var runningBundleIDs: Set<String> = []
     @Published private(set) var runningBundlePaths: Set<String> = []
 
@@ -101,7 +142,10 @@ final class MainViewModel: ObservableObject {
     }
 
     func refreshPermissions() {
-        hasFullDiskAccess = PermissionService.hasFullDiskAccess()
+        let current = PermissionService.hasFullDiskAccess()
+        if hasFullDiskAccess != current {
+            hasFullDiskAccess = current
+        }
     }
 
     func reloadAllCatalogs() {
@@ -113,17 +157,20 @@ final class MainViewModel: ObservableObject {
 
         Task {
             let (index, scannedAddons) = await Task.detached(priority: .userInitiated) {
-                let idx = AppCatalogService.scanInstalledApps()
-                let add = AppCatalogService.scanAddons()
-                return (idx, add)
+                async let idx = AppCatalogService.scanInstalledApps()
+                async let add = AppCatalogService.scanAddons()
+                return await (idx, add)
             }.value
 
             self.systemIndex = index
+            self.isSuppressingDerivedRebuild = true
             self.installedApps = index.apps
             self.addons = scannedAddons
+            self.isSuppressingDerivedRebuild = false
+            self.rebuildAppCatalogDerivedState()
+            self.rebuildAddonsDerivedState()
             self.isLoadingCatalog = false
 
-            // Auto-select first user app if nothing is selected
             if let current = self.selectedTarget {
                 if let updated = index.apps.first(where: { $0.path == current.path })
                     ?? scannedAddons.first(where: { $0.path == current.path }) {
@@ -140,40 +187,69 @@ final class MainViewModel: ObservableObject {
         }
     }
 
+    /// Computes exact physical bundle sizes concurrently (max 6 workers) and flushes UI updates in coalesced batches.
     private func computeBundleSizesInBackground() {
         sizeCalcTask?.cancel()
         isCalculatingAppSizes = true
-        let appsSnapshot = installedApps
-        let addonsSnapshot = addons
+
+        let appPaths = installedApps.map(\.path)
+        let addonPaths = addons.map(\.path)
 
         sizeCalcTask = Task {
-            for bundle in appsSnapshot {
-                if Task.isCancelled { break }
-                let path = bundle.path
-                let bytes = await Task.detached(priority: .utility) {
-                    DiskSizeCalculator.allocatedSize(at: URL(fileURLWithPath: path))
-                }.value
-                if Task.isCancelled { break }
-                if let idx = self.installedApps.firstIndex(where: { $0.path == path }) {
-                    self.installedApps[idx].bundleSizeBytes = bytes
-                    if self.selectedTarget?.path == path {
-                        self.selectedTarget?.bundleSizeBytes = bytes
+            await withTaskGroup(of: (path: String, bytes: Int64, isAddon: Bool).self) { group in
+                let maxConcurrency = 6
+                var workItems: [(path: String, isAddon: Bool)] = []
+                workItems.reserveCapacity(appPaths.count + addonPaths.count)
+                for p in appPaths { workItems.append((p, false)) }
+                for p in addonPaths { workItems.append((p, true)) }
+
+                var nextIndex = 0
+                let initialCount = min(maxConcurrency, workItems.count)
+                while nextIndex < initialCount {
+                    let item = workItems[nextIndex]
+                    nextIndex += 1
+                    group.addTask(priority: .utility) {
+                        let b = DiskSizeCalculator.allocatedSize(atPath: item.path)
+                        return (item.path, b, item.isAddon)
                     }
                 }
-            }
 
-            for addon in addonsSnapshot {
-                if Task.isCancelled { break }
-                let path = addon.path
-                let bytes = await Task.detached(priority: .utility) {
-                    DiskSizeCalculator.allocatedSize(at: URL(fileURLWithPath: path))
-                }.value
-                if Task.isCancelled { break }
-                if let idx = self.addons.firstIndex(where: { $0.path == path }) {
-                    self.addons[idx].bundleSizeBytes = bytes
-                    if self.selectedTarget?.path == path {
-                        self.selectedTarget?.bundleSizeBytes = bytes
+                var pendingAppUpdates: [String: Int64] = [:]
+                var pendingAddonUpdates: [String: Int64] = [:]
+                var lastFlushTime = CFAbsoluteTimeGetCurrent()
+
+                while let finished = await group.next() {
+                    if Task.isCancelled {
+                        group.cancelAll()
+                        return
                     }
+
+                    if finished.isAddon {
+                        pendingAddonUpdates[finished.path] = finished.bytes
+                    } else {
+                        pendingAppUpdates[finished.path] = finished.bytes
+                    }
+
+                    if nextIndex < workItems.count {
+                        let nextItem = workItems[nextIndex]
+                        nextIndex += 1
+                        group.addTask(priority: .utility) {
+                            let b = DiskSizeCalculator.allocatedSize(atPath: nextItem.path)
+                            return (nextItem.path, b, nextItem.isAddon)
+                        }
+                    }
+
+                    let now = CFAbsoluteTimeGetCurrent()
+                    if (now - lastFlushTime) >= 0.20 {
+                        self.applyCoalescedSizeUpdates(appSizes: pendingAppUpdates, addonSizes: pendingAddonUpdates)
+                        pendingAppUpdates.removeAll(keepingCapacity: true)
+                        pendingAddonUpdates.removeAll(keepingCapacity: true)
+                        lastFlushTime = now
+                    }
+                }
+
+                if !Task.isCancelled && (!pendingAppUpdates.isEmpty || !pendingAddonUpdates.isEmpty) {
+                    self.applyCoalescedSizeUpdates(appSizes: pendingAppUpdates, addonSizes: pendingAddonUpdates)
                 }
             }
 
@@ -183,15 +259,67 @@ final class MainViewModel: ObservableObject {
         }
     }
 
+    private func applyCoalescedSizeUpdates(appSizes: [String: Int64], addonSizes: [String: Int64]) {
+        isSuppressingDerivedRebuild = true
+        var appsChanged = false
+        var addonsChanged = false
+
+        if !appSizes.isEmpty {
+            var updated = installedApps
+            for i in updated.indices {
+                if let newBytes = appSizes[updated[i].path], updated[i].bundleSizeBytes != newBytes {
+                    updated[i].bundleSizeBytes = newBytes
+                    appsChanged = true
+                    if selectedTarget?.path == updated[i].path {
+                        selectedTarget?.bundleSizeBytes = newBytes
+                    }
+                }
+            }
+            if appsChanged {
+                installedApps = updated
+            }
+        }
+
+        if !addonSizes.isEmpty {
+            var updatedAddons = addons
+            for i in updatedAddons.indices {
+                if let newBytes = addonSizes[updatedAddons[i].path], updatedAddons[i].bundleSizeBytes != newBytes {
+                    updatedAddons[i].bundleSizeBytes = newBytes
+                    addonsChanged = true
+                    if selectedTarget?.path == updatedAddons[i].path {
+                        selectedTarget?.bundleSizeBytes = newBytes
+                    }
+                }
+            }
+            if addonsChanged {
+                addons = updatedAddons
+            }
+        }
+
+        isSuppressingDerivedRebuild = false
+        if appsChanged {
+            rebuildAppCatalogDerivedState()
+        }
+        if addonsChanged {
+            rebuildAddonsDerivedState()
+        }
+    }
+
     // MARK: - Running Apps Live Monitor
 
     private func startRunningMonitor() {
         let nc = NSWorkspace.shared.notificationCenter
         nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.refreshRunningAppsSnapshot() }
+            Task { @MainActor in
+                self?.refreshRunningAppsSnapshot()
+                self?.rebuildAppCatalogDerivedState()
+            }
         }
         nc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.refreshRunningAppsSnapshot() }
+            Task { @MainActor in
+                self?.refreshRunningAppsSnapshot()
+                self?.rebuildAppCatalogDerivedState()
+            }
         }
     }
 
@@ -205,159 +333,207 @@ final class MainViewModel: ObservableObject {
         let bid = bundle.bundleIdentifier.lowercased()
         if !bid.isEmpty && runningBundleIDs.contains(bid) { return true }
         if runningBundlePaths.contains(bundle.path) { return true }
+        for child in bundle.childBundleIdentifiers where runningBundleIDs.contains(child.lowercased()) {
+            return true
+        }
         return false
     }
 
-    // MARK: - Icon Cache
+    // MARK: - Bounded Icon Cache
 
     func icon(for path: String) -> NSImage {
-        if let cached = iconCache[path] {
+        let ext = (path as NSString).pathExtension.lowercased()
+        let cacheKey: NSString = Self.genericFileIconExtensions.contains(ext)
+            ? ("__ext__." + ext) as NSString
+            : path as NSString
+
+        if let cached = iconCache.object(forKey: cacheKey) {
             return cached
         }
-        let img = NSWorkspace.shared.icon(forFile: path)
+
+        let img: NSImage
+        if Self.genericFileIconExtensions.contains(ext) {
+            let contentType = UTType(filenameExtension: ext) ?? .data
+            img = NSWorkspace.shared.icon(for: contentType)
+        } else {
+            img = NSWorkspace.shared.icon(forFile: path)
+        }
         img.size = NSSize(width: 64, height: 64)
-        iconCache[path] = img
+        iconCache.setObject(img, forKey: cacheKey)
         return img
     }
 
-    // MARK: - Filtered & Sorted Collections
+    // MARK: - Single-Pass Memoized Filtering & Sorting
 
     func usageLevel(for app: TargetBundle, now: Date = Date()) -> AppUsageLevel {
         app.usageLevel(isRunning: isRunning(app), now: now)
     }
 
-    func matchesUsageFilter(_ app: TargetBundle, filter: AppUsageFilter, now: Date = Date()) -> Bool {
-        let level = usageLevel(for: app, now: now)
-        switch filter {
-        case .all:
-            return true
-        case .suggestedCleanup:
-            if app.isSystemProtected { return false }
-            return level == .neverUsed || level == .dormant
-        case .neverUsed:
-            return level == .neverUsed
-        case .dormant90Days:
-            return level == .dormant
-        case .rarelyUsed:
-            return level == .rarelyUsed
-        case .frequentlyUsed:
-            return level == .frequent
-        }
+    func countForUsageFilter(_ filter: AppUsageFilter) -> Int {
+        usageFilterCounts[filter] ?? 0
     }
 
-    private func appsMatchingScopeAndSearch() -> [TargetBundle] {
-        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return installedApps.filter { app in
+    private func rebuildAppCatalogDerivedState() {
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasQuery = !q.isEmpty
+        let now = Date()
+
+        // 1. Scope & Search pass + Precompute usage level once per matching app
+        var scopedWithLevel: [(app: TargetBundle, level: AppUsageLevel, isRunning: Bool)] = []
+        scopedWithLevel.reserveCapacity(installedApps.count)
+
+        var counts: [AppUsageFilter: Int] = [
+            .all: 0,
+            .suggestedCleanup: 0,
+            .neverUsed: 0,
+            .dormant90Days: 0,
+            .rarelyUsed: 0,
+            .frequentlyUsed: 0
+        ]
+
+        for app in installedApps {
+            let appRunning = isRunning(app)
             switch filterScope {
             case .all:
                 break
             case .userApps:
                 if app.isSystemProtected || app.bundleIdentifier.lowercased().hasPrefix("com.apple.") {
-                    return false
+                    continue
                 }
             case .running:
-                if !isRunning(app) { return false }
+                if !appRunning { continue }
             case .large:
-                if (app.bundleSizeBytes ?? 0) < 200 * 1024 * 1024 { return false }
+                if (app.bundleSizeBytes ?? 0) < 200 * 1024 * 1024 { continue }
             }
 
-            guard !q.isEmpty else { return true }
-            return app.name.lowercased().contains(q)
-                || app.bundleIdentifier.lowercased().contains(q)
-                || app.path.lowercased().contains(q)
+            if hasQuery {
+                let matched = app.name.localizedCaseInsensitiveContains(q)
+                    || app.bundleIdentifier.localizedCaseInsensitiveContains(q)
+                    || app.path.localizedCaseInsensitiveContains(q)
+                if !matched { continue }
+            }
+
+            let level = app.usageLevel(isRunning: appRunning, now: now)
+            scopedWithLevel.append((app, level, appRunning))
+
+            counts[.all, default: 0] += 1
+            if !app.isSystemProtected && (level == .neverUsed || level == .dormant) {
+                counts[.suggestedCleanup, default: 0] += 1
+            }
+            switch level {
+            case .neverUsed:
+                counts[.neverUsed, default: 0] += 1
+            case .dormant:
+                counts[.dormant90Days, default: 0] += 1
+            case .rarelyUsed:
+                counts[.rarelyUsed, default: 0] += 1
+            case .frequent:
+                counts[.frequentlyUsed, default: 0] += 1
+            }
         }
-    }
 
-    func countForUsageFilter(_ filter: AppUsageFilter) -> Int {
-        let now = Date()
-        return appsMatchingScopeAndSearch().filter { matchesUsageFilter($0, filter: filter, now: now) }.count
-    }
-
-    var filteredAppsTotalBytes: Int64 {
-        filteredApps.reduce(Int64(0)) { $0 + ($1.bundleSizeBytes ?? 0) }
-    }
-
-    var filteredApps: [TargetBundle] {
-        let now = Date()
-        var list = appsMatchingScopeAndSearch().filter {
-            matchesUsageFilter($0, filter: usageFilter, now: now)
+        // 2. Apply active usageFilter
+        var matching: [(app: TargetBundle, isRunning: Bool)] = []
+        matching.reserveCapacity(scopedWithLevel.count)
+        for entry in scopedWithLevel {
+            let keep: Bool
+            switch usageFilter {
+            case .all:
+                keep = true
+            case .suggestedCleanup:
+                keep = !entry.app.isSystemProtected && (entry.level == .neverUsed || entry.level == .dormant)
+            case .neverUsed:
+                keep = (entry.level == .neverUsed)
+            case .dormant90Days:
+                keep = (entry.level == .dormant)
+            case .rarelyUsed:
+                keep = (entry.level == .rarelyUsed)
+            case .frequentlyUsed:
+                keep = (entry.level == .frequent)
+            }
+            if keep {
+                matching.append((entry.app, entry.isRunning))
+            }
         }
 
+        // 3. Sort
         switch sortOrder {
         case .nameAsc:
-            list.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            matching.sort { $0.app.name.localizedCaseInsensitiveCompare($1.app.name) == .orderedAscending }
 
         case .leastUsedFirst:
-            list.sort { lhs, rhs in
-                let lhsRun = isRunning(lhs)
-                let rhsRun = isRunning(rhs)
-                if lhsRun != rhsRun { return !lhsRun } // Running apps sink to bottom
-
-                let lhsDate = lhs.lastUsedDate
-                let rhsDate = rhs.lastUsedDate
-                switch (lhsDate, rhsDate) {
+            matching.sort { lhs, rhs in
+                if lhs.isRunning != rhs.isRunning { return !lhs.isRunning }
+                switch (lhs.app.lastUsedDate, rhs.app.lastUsedDate) {
                 case (nil, nil):
-                    // Among never-opened apps, put largest bundle size first!
-                    let lSize = lhs.bundleSizeBytes ?? 0
-                    let rSize = rhs.bundleSizeBytes ?? 0
+                    let lSize = lhs.app.bundleSizeBytes ?? 0
+                    let rSize = rhs.app.bundleSizeBytes ?? 0
                     if lSize != rSize { return lSize > rSize }
-                    return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+                    return lhs.app.name.localizedCaseInsensitiveCompare(rhs.app.name) == .orderedAscending
                 case (nil, _?):
-                    return true // Never opened comes first
+                    return true
                 case (_?, nil):
                     return false
                 case let (l?, r?):
                     if abs(l.timeIntervalSince(r)) > 3600 {
-                        return l < r // Older lastUsedDate comes first
+                        return l < r
                     }
-                    if lhs.useCount != rhs.useCount {
-                        return lhs.useCount < rhs.useCount
+                    if lhs.app.useCount != rhs.app.useCount {
+                        return lhs.app.useCount < rhs.app.useCount
                     }
-                    return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+                    return lhs.app.name.localizedCaseInsensitiveCompare(rhs.app.name) == .orderedAscending
                 }
             }
 
         case .mostUsedFirst:
-            list.sort { lhs, rhs in
-                if lhs.useCount != rhs.useCount {
-                    return lhs.useCount > rhs.useCount
+            matching.sort { lhs, rhs in
+                if lhs.app.useCount != rhs.app.useCount {
+                    return lhs.app.useCount > rhs.app.useCount
                 }
-                let lhsRun = isRunning(lhs)
-                let rhsRun = isRunning(rhs)
-                if lhsRun != rhsRun { return lhsRun }
-                return (lhs.lastUsedDate ?? .distantPast) > (rhs.lastUsedDate ?? .distantPast)
+                if lhs.isRunning != rhs.isRunning { return lhs.isRunning }
+                return (lhs.app.lastUsedDate ?? .distantPast) > (rhs.app.lastUsedDate ?? .distantPast)
             }
 
         case .sizeDesc:
-            list.sort { ($0.bundleSizeBytes ?? -1) > ($1.bundleSizeBytes ?? -1) }
+            matching.sort { ($0.app.bundleSizeBytes ?? -1) > ($1.app.bundleSizeBytes ?? -1) }
 
         case .vendorAsc:
-            list.sort { $0.bundleIdentifier.localizedCaseInsensitiveCompare($1.bundleIdentifier) == .orderedAscending }
+            matching.sort { $0.app.bundleIdentifier.localizedCaseInsensitiveCompare($1.app.bundleIdentifier) == .orderedAscending }
         }
 
-        return list
+        let finalApps = matching.map(\.app)
+        let sumBytes = finalApps.reduce(Int64(0)) { $0 + ($1.bundleSizeBytes ?? 0) }
+
+        self.usageFilterCounts = counts
+        self.filteredApps = finalApps
+        self.filteredAppsTotalBytes = sumBytes
     }
 
-    var filteredAddons: [TargetBundle] {
-        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return addons.filter { item in
+    private func rebuildAddonsDerivedState() {
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasQuery = !q.isEmpty
+
+        filteredAddons = addons.filter { item in
             if let kind = addonFilterKind, item.kind != kind {
                 return false
             }
-            guard !q.isEmpty else { return true }
-            return item.name.lowercased().contains(q)
-                || item.bundleIdentifier.lowercased().contains(q)
-                || item.kind.rawValue.lowercased().contains(q)
+            guard hasQuery else { return true }
+            return item.name.localizedCaseInsensitiveContains(q)
+                || item.bundleIdentifier.localizedCaseInsensitiveContains(q)
+                || item.kind.rawValue.localizedCaseInsensitiveContains(q)
         }
     }
 
-    var filteredOrphans: [OrphanItem] {
-        let q = orphanSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return orphans }
-        return orphans.filter {
-            $0.name.lowercased().contains(q)
-            || $0.inferredIdentifier.lowercased().contains(q)
-            || $0.path.lowercased().contains(q)
+    private func rebuildOrphansDerivedState() {
+        let q = orphanSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else {
+            filteredOrphans = orphans
+            return
+        }
+        filteredOrphans = orphans.filter {
+            $0.name.localizedCaseInsensitiveContains(q)
+            || $0.inferredIdentifier.localizedCaseInsensitiveContains(q)
+            || $0.path.localizedCaseInsensitiveContains(q)
         }
     }
 
@@ -379,16 +555,21 @@ final class MainViewModel: ObservableObject {
             self.associatedItems = items
             self.isScanningTarget = false
 
-            // Update bundle size if discovered from primary item
             if let appItem = items.first(where: { $0.path == target.path }) {
-                if let idx = self.installedApps.firstIndex(where: { $0.path == target.path }) {
-                    self.installedApps[idx].bundleSizeBytes = appItem.sizeBytes
-                }
-                if let idx = self.addons.firstIndex(where: { $0.path == target.path }) {
-                    self.addons[idx].bundleSizeBytes = appItem.sizeBytes
-                }
-                self.selectedTarget?.bundleSizeBytes = appItem.sizeBytes
+                self.updateSingleBundleSize(path: target.path, bytes: appItem.sizeBytes)
             }
+        }
+    }
+
+    private func updateSingleBundleSize(path: String, bytes: Int64) {
+        if let idx = installedApps.firstIndex(where: { $0.path == path }), installedApps[idx].bundleSizeBytes != bytes {
+            installedApps[idx].bundleSizeBytes = bytes
+        }
+        if let idx = addons.firstIndex(where: { $0.path == path }), addons[idx].bundleSizeBytes != bytes {
+            addons[idx].bundleSizeBytes = bytes
+        }
+        if selectedTarget?.path == path {
+            selectedTarget?.bundleSizeBytes = bytes
         }
     }
 
@@ -433,8 +614,8 @@ final class MainViewModel: ObservableObject {
             activeSection = (single.kind == .application) ? .apps : .addons
             selectTarget(single)
             showToast(
-                title: "Đã phân tích sâu \(single.name)",
-                subtitle: "Kiểm tra danh sách các file liên quan bên phải trước khi gỡ cài đặt.",
+                title: "Đã phân tích \(single.name)",
+                subtitle: "Kiểm tra danh sách các tệp liên quan bên phải trước khi gỡ cài đặt.",
                 isError: false
             )
         } else {
@@ -446,8 +627,8 @@ final class MainViewModel: ObservableObject {
                 ensureBatchScanned(for: bundle)
             }
             showToast(
-                title: "Đã thêm \(validBundles.count) mục vào danh sách gỡ hàng loạt",
-                subtitle: "Đang quét toàn bộ file rác liên quan cho tất cả ứng dụng đã chọn.",
+                title: "Đã thêm \(validBundles.count) mục vào danh sách chọn nhiều",
+                subtitle: "Đang quét các tệp liên quan cho ứng dụng đã chọn.",
                 isError: false
             )
         }
@@ -465,11 +646,11 @@ final class MainViewModel: ObservableObject {
     }
 
     var selectedBytesToRemove: Int64 {
-        selectedAssociatedItems.reduce(0) { $0 + $1.sizeBytes }
+        associatedItems.reduce(0) { $0 + ($1.isSelected ? $1.sizeBytes : 0) }
     }
 
     var selectedRequiresAdmin: Bool {
-        selectedAssociatedItems.contains(where: \.requiresAdmin)
+        associatedItems.contains { $0.isSelected && $0.requiresAdmin }
     }
 
     func toggleItemSelection(_ itemID: String) {
@@ -489,7 +670,6 @@ final class MainViewModel: ObservableObject {
         }
     }
 
-    /// Selects everything safe for complete uninstallation.
     func applyPresetCompleteUninstall() {
         for idx in associatedItems.indices {
             if let target = selectedTarget, target.isSystemProtected, associatedItems[idx].path == target.path {
@@ -500,7 +680,6 @@ final class MainViewModel: ObservableObject {
         }
     }
 
-    /// Keeps the .app bundle intact and selects all user data, prefs, caches & containers (Factory Reset App!).
     func applyPresetResetAppDataOnly() {
         for idx in associatedItems.indices {
             let cat = associatedItems[idx].category
@@ -512,7 +691,6 @@ final class MainViewModel: ObservableObject {
         }
     }
 
-    /// Selects only Caches, Logs & Saved State for safe space reclamation.
     func applyPresetCachesAndLogsOnly() {
         for idx in associatedItems.indices {
             let cat = associatedItems[idx].category
@@ -549,7 +727,9 @@ final class MainViewModel: ObservableObject {
                 if !appStillExists {
                     self.installedApps.removeAll { $0.path == target.path }
                     self.addons.removeAll { $0.path == target.path }
-                    self.selectedTarget = self.installedApps.first(where: { !$0.isSystemProtected })
+                    self.batchItemsByAppPath.removeValue(forKey: target.path)
+                    self.selectedTarget = self.filteredApps.first(where: { !$0.isSystemProtected })
+                        ?? self.installedApps.first(where: { !$0.isSystemProtected })
                     if let next = self.selectedTarget {
                         self.selectTarget(next)
                     } else {
@@ -562,7 +742,7 @@ final class MainViewModel: ObservableObject {
                 let failNote = result.record.failedPaths.isEmpty
                     ? nil
                     : " (Còn \(result.record.failedPaths.count) mục bị từ chối quyền)"
-                let backupNote = result.record.archiveZipPath != nil ? " • Đã lưu bản sao .zip" : ""
+                let backupNote = result.record.archiveZipPath != nil ? " · Đã lưu bản sao .zip" : ""
                 self.showToast(
                     title: "Đã dọn sạch \(result.record.removedCount) mục của \(target.name)",
                     subtitle: "Giải phóng \(ByteFormatter.string(result.record.totalBytesFreed))\(backupNote)\(failNote ?? "")",
@@ -580,9 +760,10 @@ final class MainViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Multi-Select & Batch Uninstall
+    // MARK: - Multi-Select & Bounded Batch Scanner
 
     var activeCheckedTargets: [TargetBundle] {
+        guard !checkedTargetPaths.isEmpty else { return [] }
         let source = (activeSection == .addons) ? addons : installedApps
         return source.filter { checkedTargetPaths.contains($0.path) && !$0.isSystemProtected }
     }
@@ -600,6 +781,10 @@ final class MainViewModel: ObservableObject {
     }
 
     func exitMultiSelectMode() {
+        batchScanCoordinatorTask?.cancel()
+        batchScanCoordinatorTask = nil
+        queuedBatchBundles.removeAll()
+        scanningBatchPaths.removeAll()
         isMultiSelectMode = false
         checkedTargetPaths.removeAll()
         expandedBatchAppPaths.removeAll()
@@ -610,8 +795,9 @@ final class MainViewModel: ObservableObject {
         if checkedTargetPaths.contains(bundle.path) {
             checkedTargetPaths.remove(bundle.path)
             expandedBatchAppPaths.remove(bundle.path)
+            queuedBatchBundles.removeValue(forKey: bundle.path)
             if checkedTargetPaths.isEmpty {
-                isMultiSelectMode = false
+                exitMultiSelectMode()
             }
         } else {
             checkedTargetPaths.insert(bundle.path)
@@ -621,7 +807,6 @@ final class MainViewModel: ObservableObject {
         lastAnchorPathForRangeSelect = bundle.path
     }
 
-    /// Handles row click with native macOS `⌘ + Click` (toggle multi-select) and `⇧ + Click` (range select).
     func handleTargetRowClick(_ bundle: TargetBundle, in visibleList: [TargetBundle]) {
         let flags = NSEvent.modifierFlags
 
@@ -646,7 +831,6 @@ final class MainViewModel: ObservableObject {
         }
 
         if flags.contains(.command), !bundle.isSystemProtected {
-            // If transitioning from single selection via Cmd+Click, include the currently focused app too
             if checkedTargetPaths.isEmpty,
                let current = selectedTarget,
                !current.isSystemProtected,
@@ -679,37 +863,77 @@ final class MainViewModel: ObservableObject {
 
     func ensureBatchScanned(for bundle: TargetBundle, forceRescan: Bool = false) {
         let path = bundle.path
-        if !forceRescan, batchItemsByAppPath[path] != nil || scanningBatchPaths.contains(path) {
-            // Reuse single-target scan if we literally just scanned this exact target!
-            if batchItemsByAppPath[path] == nil, selectedTarget?.path == path, !isScanningTarget, !associatedItems.isEmpty {
+        if !forceRescan {
+            if batchItemsByAppPath[path] != nil {
+                return
+            }
+            if selectedTarget?.path == path, !isScanningTarget, !associatedItems.isEmpty {
                 batchItemsByAppPath[path] = associatedItems
+                return
             }
-            return
-        }
-        if !forceRescan, selectedTarget?.path == path, !isScanningTarget, !associatedItems.isEmpty {
-            batchItemsByAppPath[path] = associatedItems
-            return
+            if scanningBatchPaths.contains(path) || queuedBatchBundles[path] != nil {
+                return
+            }
+        } else {
+            batchItemsByAppPath.removeValue(forKey: path)
         }
 
+        queuedBatchBundles[path] = bundle
         scanningBatchPaths.insert(path)
-        let indexSnapshot = systemIndex
+        startBatchCoordinatorIfNeeded()
+    }
 
-        Task {
-            let scanned = await Task.detached(priority: .userInitiated) {
-                DeepFileScanner.scanAssociatedFiles(for: bundle, systemIndex: indexSnapshot)
-            }.value
+    /// Processes queued batch deep-scans with a bounded pool of 4 concurrent workers instead of spawning unbounded Tasks.
+    private func startBatchCoordinatorIfNeeded() {
+        guard batchScanCoordinatorTask == nil else { return }
 
-            self.scanningBatchPaths.remove(path)
-            self.batchItemsByAppPath[path] = scanned
-
-            if let primary = scanned.first(where: { $0.path == path }) {
-                if let idx = self.installedApps.firstIndex(where: { $0.path == path }) {
-                    self.installedApps[idx].bundleSizeBytes = primary.sizeBytes
+        batchScanCoordinatorTask = Task {
+            while !Task.isCancelled && !self.queuedBatchBundles.isEmpty {
+                // Take up to 16 queued items per wave and run max 4 concurrently
+                let currentWave = Array(self.queuedBatchBundles.values.prefix(16))
+                for b in currentWave {
+                    self.queuedBatchBundles.removeValue(forKey: b.path)
                 }
-                if let idx = self.addons.firstIndex(where: { $0.path == path }) {
-                    self.addons[idx].bundleSizeBytes = primary.sizeBytes
+                let indexSnapshot = self.systemIndex
+
+                await withTaskGroup(of: (String, [AssociatedFileItem]).self) { group in
+                    let maxWorkers = 4
+                    var nextIdx = 0
+                    let initial = min(maxWorkers, currentWave.count)
+                    while nextIdx < initial {
+                        let target = currentWave[nextIdx]
+                        nextIdx += 1
+                        group.addTask(priority: .userInitiated) {
+                            let items = DeepFileScanner.scanAssociatedFiles(for: target, systemIndex: indexSnapshot)
+                            return (target.path, items)
+                        }
+                    }
+
+                    while let (donePath, scannedItems) = await group.next() {
+                        if Task.isCancelled {
+                            group.cancelAll()
+                            return
+                        }
+                        self.scanningBatchPaths.remove(donePath)
+                        if self.checkedTargetPaths.contains(donePath) {
+                            self.batchItemsByAppPath[donePath] = scannedItems
+                        }
+                        if let primary = scannedItems.first(where: { $0.path == donePath }) {
+                            self.updateSingleBundleSize(path: donePath, bytes: primary.sizeBytes)
+                        }
+
+                        if nextIdx < currentWave.count {
+                            let nextTarget = currentWave[nextIdx]
+                            nextIdx += 1
+                            group.addTask(priority: .userInitiated) {
+                                let items = DeepFileScanner.scanAssociatedFiles(for: nextTarget, systemIndex: indexSnapshot)
+                                return (nextTarget.path, items)
+                            }
+                        }
+                    }
                 }
             }
+            self.batchScanCoordinatorTask = nil
         }
     }
 
@@ -771,7 +995,7 @@ final class MainViewModel: ObservableObject {
     }
 
     var isScanningAnyCheckedTarget: Bool {
-        activeCheckedTargets.contains { scanningBatchPaths.contains($0.path) }
+        !scanningBatchPaths.isEmpty && activeCheckedTargets.contains { scanningBatchPaths.contains($0.path) }
     }
 
     var batchAllSelectedItemsDeduplicated: [AssociatedFileItem] {
@@ -801,11 +1025,25 @@ final class MainViewModel: ObservableObject {
     }
 
     var batchSelectedBytesToRemove: Int64 {
-        batchAllSelectedItemsDeduplicated.reduce(0) { $0 + $1.sizeBytes }
+        var seen = Set<String>()
+        var total: Int64 = 0
+        for bundle in activeCheckedTargets {
+            for item in (batchItemsByAppPath[bundle.path] ?? []) where item.isSelected {
+                if seen.insert(item.path).inserted {
+                    total += item.sizeBytes
+                }
+            }
+        }
+        return total
     }
 
     var batchRequiresAdmin: Bool {
-        batchAllSelectedItemsDeduplicated.contains(where: \.requiresAdmin)
+        for bundle in activeCheckedTargets {
+            for item in (batchItemsByAppPath[bundle.path] ?? []) where item.isSelected && item.requiresAdmin {
+                return true
+            }
+        }
+        return false
     }
 
     func executeBatchUninstall() {
@@ -839,6 +1077,7 @@ final class MainViewModel: ObservableObject {
                 self.isExecutingAction = false
                 self.historyRecords = UninstallEngine.loadHistory()
 
+                self.isSuppressingDerivedRebuild = true
                 for target in targets {
                     let stillExists = FileManager.default.fileExists(atPath: target.path)
                     if !stillExists {
@@ -851,10 +1090,14 @@ final class MainViewModel: ObservableObject {
                         self.ensureBatchScanned(for: target, forceRescan: true)
                     }
                 }
+                self.isSuppressingDerivedRebuild = false
+                self.rebuildAppCatalogDerivedState()
+                self.rebuildAddonsDerivedState()
 
                 if self.checkedTargetPaths.isEmpty {
-                    self.isMultiSelectMode = false
-                    self.selectedTarget = self.installedApps.first(where: { !$0.isSystemProtected })
+                    self.exitMultiSelectMode()
+                    self.selectedTarget = self.filteredApps.first(where: { !$0.isSystemProtected })
+                        ?? self.installedApps.first(where: { !$0.isSystemProtected })
                     if let next = self.selectedTarget {
                         self.selectTarget(next)
                     } else {
@@ -916,17 +1159,19 @@ final class MainViewModel: ObservableObject {
     }
 
     func setAllOrphansSelection(_ selected: Bool) {
-        for idx in orphans.indices {
-            orphans[idx].isSelected = selected
+        var copy = orphans
+        for idx in copy.indices {
+            copy[idx].isSelected = selected
         }
+        orphans = copy
     }
 
     var selectedOrphansCount: Int {
-        orphans.filter(\.isSelected).count
+        orphans.reduce(0) { $0 + ($1.isSelected ? 1 : 0) }
     }
 
     var selectedOrphansBytes: Int64 {
-        orphans.filter(\.isSelected).reduce(0) { $0 + $1.sizeBytes }
+        orphans.reduce(0) { $0 + ($1.isSelected ? $1.sizeBytes : 0) }
     }
 
     func executeOrphanCleanup() {
@@ -977,7 +1222,7 @@ final class MainViewModel: ObservableObject {
                 self.reloadAllCatalogs()
                 self.showToast(
                     title: "Đã hoàn tác & khôi phục \(restored.targetName)",
-                    subtitle: "Các file đã được đặt trả về đúng thư mục gốc trước khi xóa.",
+                    subtitle: "Các tệp đã được đặt trả về đúng thư mục gốc trước khi xóa.",
                     isError: false
                 )
             } catch {

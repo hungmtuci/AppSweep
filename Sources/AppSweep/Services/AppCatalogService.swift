@@ -1,85 +1,88 @@
 import AppKit
 import CoreServices
+import Darwin
 import Foundation
 import Security
 
 enum DiskSizeCalculator {
-    /// Calculates actual allocated bytes on disk (handles sparse files and symlinks safely).
-    static func allocatedSize(at url: URL) -> Int64 {
-        let fm = FileManager.default
-        let keys: Set<URLResourceKey> = [
-            .isRegularFileKey,
-            .isDirectoryKey,
-            .isSymbolicLinkKey,
-            .totalFileAllocatedSizeKey,
-            .fileAllocatedSizeKey,
-            .totalFileSizeKey,
-            .fileSizeKey
-        ]
+    private struct InodeKey: Hashable {
+        let dev: dev_t
+        let ino: ino_t
+    }
 
-        guard let rootValues = try? url.resourceValues(forKeys: keys) else {
+    /// High-speed POSIX `fts_open` physical disk size calculator.
+    /// Avoids Foundation `NSURL` / `NSDirectoryEnumerator` heap allocations per file,
+    /// handles sparse files accurately via `st_blocks`, and deduplicates hard links (`st_nlink > 1`).
+    static func allocatedSize(at url: URL) -> Int64 {
+        allocatedSize(atPath: url.path)
+    }
+
+    static func allocatedSize(atPath path: String) -> Int64 {
+        var rootStat = stat()
+        guard lstat(path, &rootStat) == 0 else { return 0 }
+
+        let modeType = rootStat.st_mode & S_IFMT
+        if modeType == S_IFLNK {
+            return max(0, Int64(rootStat.st_size))
+        }
+        if modeType != S_IFDIR {
+            let blocksBytes = Int64(rootStat.st_blocks) * 512
+            return blocksBytes > 0 ? blocksBytes : max(0, Int64(rootStat.st_size))
+        }
+
+        guard let cPath = strdup(path) else { return 0 }
+        defer { free(cPath) }
+
+        var pathArray: [UnsafeMutablePointer<CChar>?] = [cPath, nil]
+        guard let fts = pathArray.withUnsafeMutableBufferPointer({ buf in
+            fts_open(buf.baseAddress, FTS_PHYSICAL | FTS_NOCHDIR | FTS_XDEV, nil)
+        }) else {
             return 0
         }
-
-        if rootValues.isSymbolicLink == true {
-            return Int64(rootValues.fileSize ?? 0)
-        }
-
-        if rootValues.isDirectory != true {
-            return Int64(
-                rootValues.totalFileAllocatedSize
-                ?? rootValues.fileAllocatedSize
-                ?? rootValues.totalFileSize
-                ?? rootValues.fileSize
-                ?? 0
-            )
-        }
+        defer { fts_close(fts) }
 
         var total: Int64 = 0
-        guard let enumerator = fm.enumerator(
-            at: url,
-            includingPropertiesForKeys: Array(keys),
-            options: [],
-            errorHandler: { _, _ in true }
-        ) else {
-            return 0
-        }
+        var seenHardLinks = Set<InodeKey>()
+        var counter: Int = 0
 
-        for case let fileURL as URL in enumerator {
-            if Task.isCancelled { break }
-            guard let values = try? fileURL.resourceValues(forKeys: keys) else { continue }
-            if values.isSymbolicLink == true { continue }
-            if values.isRegularFile == true {
-                let bytes = values.totalFileAllocatedSize
-                    ?? values.fileAllocatedSize
-                    ?? values.totalFileSize
-                    ?? values.fileSize
-                    ?? 0
-                total += Int64(bytes)
+        while let entry = fts_read(fts) {
+            counter &+= 1
+            if (counter & 511) == 0 && Task.isCancelled {
+                break
+            }
+
+            let info = Int32(entry.pointee.fts_info)
+            if info == FTS_F, let stPtr = entry.pointee.fts_statp {
+                if stPtr.pointee.st_nlink > 1 {
+                    let key = InodeKey(dev: stPtr.pointee.st_dev, ino: stPtr.pointee.st_ino)
+                    if !seenHardLinks.insert(key).inserted {
+                        continue
+                    }
+                }
+                let blocksBytes = Int64(stPtr.pointee.st_blocks) * 512
+                total += (blocksBytes > 0) ? blocksBytes : max(0, Int64(stPtr.pointee.st_size))
+            } else if (info == FTS_SL || info == FTS_SLNONE), let stPtr = entry.pointee.fts_statp {
+                total += max(0, Int64(stPtr.pointee.st_size))
             }
         }
         return total
     }
 
-    /// Checks whether removing `path` likely requires Administrator privileges.
+    /// Checks whether removing `path` likely requires Administrator privileges using fast `access(2)` & `lstat(2)`.
     static func requiresAdminToModify(path: String) -> Bool {
-        let fm = FileManager.default
         let parent = (path as NSString).deletingLastPathComponent
-        if !fm.isWritableFile(atPath: parent) {
+        if access(parent, W_OK) != 0 {
             return true
         }
-        if fm.fileExists(atPath: path) && !fm.isWritableFile(atPath: path) {
-            // Check ownership: if owned by current user, chmod/trash usually works; if root (uid 0), admin is required.
-            if let attrs = try? fm.attributesOfItem(atPath: path),
-               let ownerID = attrs[.ownerAccountID] as? NSNumber {
-                return ownerID.uint32Value != getuid()
-            }
-            return true
+
+        var st = stat()
+        guard lstat(path, &st) == 0 else { return false }
+
+        let currentUID = getuid()
+        if access(path, W_OK) != 0 {
+            return st.st_uid != currentUID
         }
-        if let attrs = try? fm.attributesOfItem(atPath: path),
-           let ownerID = attrs[.ownerAccountID] as? NSNumber,
-           ownerID.uint32Value == 0,
-           !path.hasPrefix(NSHomeDirectory()) {
+        if st.st_uid == 0 && !path.hasPrefix(NSHomeDirectory()) {
             return true
         }
         return false
@@ -109,7 +112,7 @@ enum AppCatalogService {
         "appex": .widget
     ]
 
-    /// Scans installed user & third-party apps plus indexes system apps for orphan & sibling-vendor safety.
+    /// Scans installed user & third-party apps in parallel across CPU cores, plus indexes system apps for safety.
     static func scanInstalledApps() -> InstalledSystemIndex {
         let home = NSHomeDirectory()
         let userAppRoots = [
@@ -123,47 +126,53 @@ enum AppCatalogService {
         ]
 
         var seenPaths = Set<String>()
-        var visibleApps: [TargetBundle] = []
+        var userURLs: [URL] = []
+        for root in userAppRoots {
+            for url in discoverAppBundles(in: URL(fileURLWithPath: root), maxDepth: 2) {
+                let canonical = url.standardizedFileURL.path
+                if seenPaths.insert(canonical).inserted {
+                    userURLs.append(url)
+                }
+            }
+        }
+
+        var systemURLs: [URL] = []
+        for root in systemRoots {
+            for url in discoverAppBundles(in: URL(fileURLWithPath: root), maxDepth: 2) {
+                let canonical = url.standardizedFileURL.path
+                if seenPaths.insert(canonical).inserted {
+                    systemURLs.append(url)
+                }
+            }
+        }
+
+        let visibleApps = inspectBundlesConcurrently(urls: userURLs, kindOverride: .application, includeCodeSignTeam: true)
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+
+        let systemApps = inspectBundlesConcurrently(urls: systemURLs, kindOverride: .application, includeCodeSignTeam: false)
+
         var allBundleIDs = Set<String>()
         var allAppNames = Set<String>()
         var teamMap: [String: Set<String>] = [:]
         var vendorMap: [String: Set<String>] = [:]
 
-        for root in userAppRoots {
-            let urls = discoverAppBundles(in: URL(fileURLWithPath: root), maxDepth: 2)
-            for url in urls {
-                let canonical = url.standardizedFileURL.path
-                guard seenPaths.insert(canonical).inserted else { continue }
-                guard let bundle = inspectBundle(at: url, kindOverride: .application) else { continue }
-                visibleApps.append(bundle)
-                registerInIndex(
-                    bundle: bundle,
-                    allBundleIDs: &allBundleIDs,
-                    allAppNames: &allAppNames,
-                    teamMap: &teamMap,
-                    vendorMap: &vendorMap
-                )
-            }
+        for bundle in visibleApps {
+            registerInIndex(
+                bundle: bundle,
+                allBundleIDs: &allBundleIDs,
+                allAppNames: &allAppNames,
+                teamMap: &teamMap,
+                vendorMap: &vendorMap
+            )
         }
-
-        for root in systemRoots {
-            let urls = discoverAppBundles(in: URL(fileURLWithPath: root), maxDepth: 2)
-            for url in urls {
-                let canonical = url.standardizedFileURL.path
-                guard seenPaths.insert(canonical).inserted else { continue }
-                guard let bundle = inspectBundle(at: url, kindOverride: .application, includeCodeSignTeam: false) else { continue }
-                registerInIndex(
-                    bundle: bundle,
-                    allBundleIDs: &allBundleIDs,
-                    allAppNames: &allAppNames,
-                    teamMap: &teamMap,
-                    vendorMap: &vendorMap
-                )
-            }
-        }
-
-        visibleApps.sort {
-            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        for bundle in systemApps {
+            registerInIndex(
+                bundle: bundle,
+                allBundleIDs: &allBundleIDs,
+                allAppNames: &allAppNames,
+                teamMap: &teamMap,
+                vendorMap: &vendorMap
+            )
         }
 
         return InstalledSystemIndex(
@@ -173,6 +182,30 @@ enum AppCatalogService {
             teamIDToAppPaths: teamMap,
             vendorPrefixToAppPaths: vendorMap
         )
+    }
+
+    private static func inspectBundlesConcurrently(
+        urls: [URL],
+        kindOverride: BundleKind?,
+        includeCodeSignTeam: Bool
+    ) -> [TargetBundle] {
+        guard !urls.isEmpty else { return [] }
+        let lock = NSLock()
+        var collected: [TargetBundle] = []
+        collected.reserveCapacity(urls.count)
+
+        DispatchQueue.concurrentPerform(iterations: urls.count) { idx in
+            if let bundle = inspectBundle(
+                at: urls[idx],
+                kindOverride: kindOverride,
+                includeCodeSignTeam: includeCodeSignTeam
+            ) {
+                lock.lock()
+                collected.append(bundle)
+                lock.unlock()
+            }
+        }
+        return collected
     }
 
     private static func registerInIndex(
@@ -227,13 +260,13 @@ enum AppCatalogService {
         ]
 
         let fm = FileManager.default
-        var results: [TargetBundle] = []
+        var candidates: [(URL, BundleKind)] = []
         var seen = Set<String>()
 
         for (dirPath, defaultKind) in locations {
             guard let items = try? fm.contentsOfDirectory(
                 at: URL(fileURLWithPath: dirPath),
-                includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
+                includingPropertiesForKeys: [.isDirectoryKey],
                 options: [.skipsHiddenFiles]
             ) else { continue }
 
@@ -242,9 +275,21 @@ enum AppCatalogService {
                 guard let kind = supportedAddonExtensions[ext] ?? defaultKind else { continue }
                 let canonical = itemURL.standardizedFileURL.path
                 guard seen.insert(canonical).inserted else { continue }
-                if let bundle = inspectBundle(at: itemURL, kindOverride: kind, includeCodeSignTeam: false) {
-                    results.append(bundle)
-                }
+                candidates.append((itemURL, kind))
+            }
+        }
+
+        guard !candidates.isEmpty else { return [] }
+        let lock = NSLock()
+        var results: [TargetBundle] = []
+        results.reserveCapacity(candidates.count)
+
+        DispatchQueue.concurrentPerform(iterations: candidates.count) { idx in
+            let (url, kind) = candidates[idx]
+            if let bundle = inspectBundle(at: url, kindOverride: kind, includeCodeSignTeam: false) {
+                lock.lock()
+                results.append(bundle)
+                lock.unlock()
             }
         }
 
@@ -318,7 +363,6 @@ enum AppCatalogService {
         let bundleName = (plist["CFBundleName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let executableName = (plist["CFBundleExecutable"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? fileStem
         let resolvedName: String = {
-            // Prefer localized Finder display name if cleaner, otherwise Info.plist display name / file stem
             let finderName = fm.displayName(atPath: url.path)
             let cleanedFinder = finderName.hasSuffix(".\(url.pathExtension)")
                 ? String(finderName.dropLast(url.pathExtension.count + 1))
@@ -339,7 +383,9 @@ enum AppCatalogService {
             privilegedLabels = Array(smDict.keys)
         }
 
-        let (childIDs, childExecs) = scanEmbeddedChildBundles(contentsURL: contentsURL)
+        let (childIDs, childExecs) = includeCodeSignTeam
+            ? scanEmbeddedChildBundles(contentsURL: contentsURL)
+            : ([], [])
 
         let arch: AppArchitecture
         let execURL = contentsURL.appendingPathComponent("MacOS").appendingPathComponent(executableName)
@@ -352,7 +398,9 @@ enum AppCatalogService {
         let teamID: String? = includeCodeSignTeam ? extractCodeSignTeamID(at: url) : nil
 
         let modDate = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        let (lastUsedDate, useCount, dateAdded) = extractUsageMetadata(bundleURL: url, bundleID: bundleID)
+        let (lastUsedDate, useCount, dateAdded, spotlightBytes) = includeCodeSignTeam
+            ? extractUsageAndSizeMetadata(bundleURL: url, bundleID: bundleID)
+            : (nil, 0, nil, nil)
 
         let ownBundleID = Bundle.main.bundleIdentifier ?? "com.hunglx.AppSweep"
         let lowerID = bundleID.lowercased()
@@ -375,7 +423,7 @@ enum AppCatalogService {
             childExecutableNames: childExecs,
             privilegedHelperLabels: privilegedLabels,
             architecture: arch,
-            bundleSizeBytes: nil,
+            bundleSizeBytes: spotlightBytes,
             modifiedDate: modDate,
             lastUsedDate: lastUsedDate,
             useCount: useCount,
@@ -385,31 +433,39 @@ enum AppCatalogService {
         )
     }
 
-    private static func extractUsageMetadata(bundleURL: URL, bundleID: String) -> (Date?, Int, Date?) {
+    private static let spotlightAttrNames: CFArray = [
+        "kMDItemLastUsedDate" as CFString,
+        "kMDItemUseCount" as CFString,
+        "kMDItemDateAdded" as CFString,
+        "kMDItemFSSize" as CFString
+    ] as CFArray
+
+    private static func extractUsageAndSizeMetadata(
+        bundleURL: URL,
+        bundleID: String
+    ) -> (Date?, Int, Date?, Int64?) {
         var spotlightLastUsed: Date? = nil
         var spotlightUseCount: Int = 0
         var spotlightDateAdded: Date? = nil
+        var spotlightSize: Int64? = nil
 
-        if let mdItem = MDItemCreateWithURL(kCFAllocatorDefault, bundleURL as CFURL) {
-            let attrNames = [
-                "kMDItemLastUsedDate" as CFString,
-                "kMDItemUseCount" as CFString,
-                "kMDItemDateAdded" as CFString
-            ] as CFArray
-            if let attrs = MDItemCopyAttributes(mdItem, attrNames) as? [String: Any] {
-                spotlightLastUsed = attrs["kMDItemLastUsedDate"] as? Date
-                spotlightUseCount = (attrs["kMDItemUseCount"] as? NSNumber)?.intValue ?? 0
-                spotlightDateAdded = attrs["kMDItemDateAdded"] as? Date
+        if let mdItem = MDItemCreateWithURL(kCFAllocatorDefault, bundleURL as CFURL),
+           let attrs = MDItemCopyAttributes(mdItem, spotlightAttrNames) as? [String: Any] {
+            spotlightLastUsed = attrs["kMDItemLastUsedDate"] as? Date
+            spotlightUseCount = (attrs["kMDItemUseCount"] as? NSNumber)?.intValue ?? 0
+            spotlightDateAdded = attrs["kMDItemDateAdded"] as? Date
+            if let rawSize = (attrs["kMDItemFSSize"] as? NSNumber)?.int64Value, rawSize > 0 {
+                spotlightSize = rawSize
             }
         }
 
         // Augment with ~/Library/Saved Application State/<bundleID>.savedState modification date
-        // so apps launched via URL schemes, CLI, or Login Items still reflect accurate recent activity.
         if !bundleID.isEmpty {
             let savedStatePath = (NSHomeDirectory() as NSString)
                 .appendingPathComponent("Library/Saved Application State/\(bundleID).savedState")
-            if FileManager.default.fileExists(atPath: savedStatePath),
-               let stateMod = (try? URL(fileURLWithPath: savedStatePath).resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate {
+            var st = stat()
+            if stat(savedStatePath, &st) == 0 {
+                let stateMod = Date(timeIntervalSince1970: TimeInterval(st.st_mtimespec.tv_sec))
                 if let current = spotlightLastUsed {
                     if stateMod > current {
                         spotlightLastUsed = stateMod
@@ -421,7 +477,7 @@ enum AppCatalogService {
             }
         }
 
-        return (spotlightLastUsed, spotlightUseCount, spotlightDateAdded)
+        return (spotlightLastUsed, spotlightUseCount, spotlightDateAdded, spotlightSize)
     }
 
     private static func scanEmbeddedChildBundles(contentsURL: URL) -> ([String], [String]) {
@@ -450,7 +506,6 @@ enum AppCatalogService {
                         childExecs.insert(cexec)
                     }
                 } else {
-                    // Bare helper executable inside Helpers/
                     let name = item.lastPathComponent
                     if !name.isEmpty, item.pathExtension.isEmpty {
                         childExecs.insert(name)
@@ -480,21 +535,25 @@ enum AppCatalogService {
     }
 
     private static func detectMachOArchitecture(at executableURL: URL) -> AppArchitecture {
-        guard let handle = try? FileHandle(forReadingFrom: executableURL) else { return .unknown }
-        defer { try? handle.close() }
-        guard let data = try? handle.read(upToCount: 32), data.count >= 8 else { return .unknown }
+        let fd = open(executableURL.path, O_RDONLY)
+        guard fd >= 0 else { return .unknown }
+        defer { close(fd) }
 
-        let magic = data.withUnsafeBytes { $0.load(as: UInt32.self) }
+        var header = [UInt8](repeating: 0, count: 8)
+        let bytesRead = read(fd, &header, 8)
+        guard bytesRead == 8 else { return .unknown }
+
+        let magic = header.withUnsafeBytes { $0.load(as: UInt32.self) }
         switch magic {
         case 0xCAFEBABE, 0xBEBAFECA, 0xCAFEBABF, 0xBFBAFECA:
             return .universal
         case 0xFEEDFACF, 0xFEEDFACE:
-            let cpuType = data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Int32.self) }
+            let cpuType = header.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Int32.self) }
             if (cpuType & 0x00FF_FFFF) == 12 { return .appleSilicon }
             if (cpuType & 0x00FF_FFFF) == 7 { return .intel }
             return .unknown
         case 0xCFFAEDFE, 0xCEFAEDFE:
-            let swapped = data.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self).byteSwapped }
+            let swapped = header.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self).byteSwapped }
             if (swapped & 0x00FF_FFFF) == 12 { return .appleSilicon }
             if (swapped & 0x00FF_FFFF) == 7 { return .intel }
             return .unknown
@@ -504,8 +563,14 @@ enum AppCatalogService {
     }
 
     static func normalizeToken(_ raw: String) -> String {
+        var result = ""
+        result.reserveCapacity(raw.utf8.count)
         let folded = raw.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-        let allowed = folded.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }
-        return String(String.UnicodeScalarView(allowed)).lowercased()
+        for scalar in folded.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) {
+                result.unicodeScalars.append(scalar)
+            }
+        }
+        return result.lowercased()
     }
 }
