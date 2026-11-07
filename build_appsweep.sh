@@ -7,7 +7,7 @@ cd "$PROJECT_DIR"
 
 APP_NAME="AppSweep"
 BUNDLE_ID="com.hunglx.AppSweep"
-VERSION="${APPSWEEP_VERSION:-1.3.1}"
+VERSION="${APPSWEEP_VERSION:-1.3.2}"
 APP_BUNDLE="$PROJECT_DIR/$APP_NAME.app"
 ROOT_APP_BUNDLE="$ROOT_WORKSPACE_DIR/$APP_NAME.app"
 DIST_DIR="$PROJECT_DIR/dist"
@@ -21,8 +21,9 @@ else
 fi
 
 echo "==> [2/6] Đang tạo biểu tượng ứng dụng (AppIcon.icns)..."
-ICONSET_DIR="$PROJECT_DIR/.build/AppIcon.iconset"
-rm -rf "$ICONSET_DIR"
+STAGE_ROOT="$(mktemp -d /tmp/AppSweepBuildStage.XXXXXX)"
+trap 'rm -rf "$STAGE_ROOT"' EXIT
+ICONSET_DIR="$STAGE_ROOT/AppIcon.iconset"
 mkdir -p "$ICONSET_DIR"
 
 swift - "$ICONSET_DIR" << 'SWIFT_ICON'
@@ -97,8 +98,6 @@ for (px, name) in sizes {
 SWIFT_ICON
 
 echo "==> [3/6] Đang đóng gói $APP_NAME.app..."
-STAGE_ROOT="$(mktemp -d /tmp/AppSweepBuildStage.XXXXXX)"
-trap 'rm -rf "$STAGE_ROOT"' EXIT
 STAGE_APP="$STAGE_ROOT/$APP_NAME.app"
 STAGE_CONTENTS="$STAGE_APP/Contents"
 STAGE_MACOS="$STAGE_CONTENTS/MacOS"
@@ -108,7 +107,7 @@ mkdir -p "$STAGE_MACOS" "$STAGE_RESOURCES"
 cp -X "$BIN_PATH" "$STAGE_MACOS/$APP_NAME"
 chmod +x "$STAGE_MACOS/$APP_NAME"
 
-iconutil -c icns "$ICONSET_DIR" -o "$STAGE_RESOURCES/AppIcon.icns" || true
+iconutil -c icns "$ICONSET_DIR" -o "$STAGE_RESOURCES/AppIcon.icns"
 
 cat > "$STAGE_CONTENTS/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -166,7 +165,9 @@ codesign --force --deep --sign - "$STAGE_APP"
 codesign --verify --deep --strict "$STAGE_APP"
 
 rm -rf "$APP_BUNDLE"
-ditto --noextattr "$STAGE_APP" "$APP_BUNDLE"
+ditto --norsrc --noextattr "$STAGE_APP" "$APP_BUNDLE"
+xattr -d com.apple.FinderInfo "$APP_BUNDLE" 2>/dev/null || true
+xattr -d com.apple.ResourceFork "$APP_BUNDLE" 2>/dev/null || true
 
 echo "==> [5/6] Đang tạo bộ cài đặt .DMG và .ZIP tại thư mục dist/..."
 rm -rf "$DIST_DIR"
@@ -175,7 +176,7 @@ mkdir -p "$DIST_DIR"
 DMG_STAGING="$STAGE_ROOT/dmg_staging"
 mkdir -p "$DMG_STAGING"
 
-ditto --noextattr "$STAGE_APP" "$DMG_STAGING/$APP_NAME.app"
+ditto --norsrc --noextattr "$STAGE_APP" "$DMG_STAGING/$APP_NAME.app"
 ln -s /Applications "$DMG_STAGING/Applications"
 
 cat > "$DMG_STAGING/Cai_Dat_AppSweep.command" << 'INSTALLER_EOF'
@@ -189,9 +190,9 @@ echo "===================================================="
 echo "  Đang cài đặt AppSweep vào /Applications..."
 echo "===================================================="
 
-pkill -f AppSweep 2>/dev/null || true
+pkill -x AppSweep 2>/dev/null || true
 rm -rf "$APP_DST"
-ditto --noextattr "$APP_SRC" "$APP_DST"
+ditto --norsrc --noextattr "$APP_SRC" "$APP_DST"
 xattr -cr "$APP_DST" 2>/dev/null || true
 
 echo "✓ Đã cài đặt thành công tại: $APP_DST"
@@ -218,7 +219,9 @@ ditto -c -k --norsrc --noextattr --keepParent "$STAGE_APP" "$ZIP_PATH"
 echo "==> [6/6] Đồng bộ $ROOT_APP_BUNDLE..."
 if [ "${CI:-}" != "true" ] && [ "$ROOT_WORKSPACE_DIR" != "$PROJECT_DIR" ] && [ -w "$ROOT_WORKSPACE_DIR" ]; then
     rm -rf "$ROOT_APP_BUNDLE"
-    ditto --noextattr "$STAGE_APP" "$ROOT_APP_BUNDLE"
+    ditto --norsrc --noextattr "$STAGE_APP" "$ROOT_APP_BUNDLE"
+    xattr -d com.apple.FinderInfo "$ROOT_APP_BUNDLE" 2>/dev/null || true
+    xattr -d com.apple.ResourceFork "$ROOT_APP_BUNDLE" 2>/dev/null || true
 fi
 
 echo "==> Hoàn tất!"

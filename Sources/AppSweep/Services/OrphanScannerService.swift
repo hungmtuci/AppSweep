@@ -140,14 +140,27 @@ enum OrphanScannerService {
 
                 guard let dict = NSDictionary(contentsOf: item) as? [String: Any] else { continue }
                 let program: String? = {
-                    if let p = dict["Program"] as? String { return p }
-                    if let args = dict["ProgramArguments"] as? [String], let first = args.first { return first }
+                    if let p = (dict["Program"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !p.isEmpty {
+                        return p
+                    }
+                    if let args = dict["ProgramArguments"] as? [String], let first = args.first {
+                        let trimmed = first.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.hasPrefix("/") {
+                            if let spaceRange = trimmed.range(of: " -") {
+                                return String(trimmed[..<spaceRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+                            }
+                            return trimmed
+                        }
+                    }
                     return nil
                 }()
 
                 if let program, program.hasPrefix("/"),
                    !program.hasPrefix("/bin/"),
                    !program.hasPrefix("/usr/bin/"),
+                   !program.hasPrefix("/usr/sbin/"),
+                   !program.hasPrefix("/usr/libexec/"),
                    !program.hasPrefix("/sbin/"),
                    !program.hasPrefix("/System/"),
                    !fm.fileExists(atPath: program) {

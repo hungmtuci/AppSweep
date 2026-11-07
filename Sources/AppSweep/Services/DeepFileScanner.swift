@@ -2,15 +2,32 @@ import Darwin
 import Foundation
 
 enum DeepFileScanner {
+    struct SharedAccessor: Sendable {
+        func isProtectedPath(_ path: String) -> Bool {
+            DeepFileScanner.isProtectedPath(path)
+        }
+    }
+
+    static let shared = SharedAccessor()
+
     /// Protected system & user directories that must NEVER be offered for deletion.
-    private static let protectedExactPaths: Set<String> = {
+    static let protectedExactPaths: Set<String> = {
         let home = NSHomeDirectory()
         return Set([
             "/",
             "/System",
             "/Applications",
             "/Library",
+            "/Library/Application Support",
+            "/Library/Caches",
+            "/Library/Containers",
+            "/Library/Group Containers",
+            "/Library/Preferences",
+            "/Library/LaunchAgents",
+            "/Library/LaunchDaemons",
+            "/Library/PrivilegedHelperTools",
             "/Users",
+            "/Users/Shared",
             "/bin",
             "/sbin",
             "/usr",
@@ -50,6 +67,26 @@ enum DeepFileScanner {
         ])
     }()
 
+    static func isProtectedPath(_ path: String) -> Bool {
+        if protectedExactPaths.contains(path) {
+            return true
+        }
+        if path.hasPrefix("/System/")
+            || path.hasPrefix("/usr/")
+            || path.hasPrefix("/bin/")
+            || path.hasPrefix("/sbin/") {
+            return true
+        }
+        let comps = path.split(separator: "/")
+        if comps.count < 2 {
+            return true
+        }
+        if (comps.first == "Users" || comps.first == "Library" || comps.first == "System") && comps.count < 3 {
+            return true
+        }
+        return false
+    }
+
     /// Generic words that must never be used alone as loose name tokens.
     private static let genericTokens: Set<String> = [
         "app", "mac", "macos", "osx", "helper", "agent", "daemon", "client",
@@ -88,7 +125,9 @@ enum DeepFileScanner {
             autoSelect: Bool? = nil
         ) {
             let standardized = url.standardizedFileURL.path
-            guard !isBlockedSystemOrProtectedPath(standardized, target: target) else { return }
+            let resolved = url.resolvingSymlinksInPath().standardizedFileURL.path
+            guard !isBlockedSystemOrProtectedPath(standardized, target: target),
+                  !isBlockedSystemOrProtectedPath(resolved, target: target) else { return }
 
             var st = stat()
             guard lstat(standardized, &st) == 0 else { return }
@@ -480,12 +519,11 @@ enum DeepFileScanner {
             }
 
             if let lowerTeam, !lowerTeam.isEmpty, lower.hasPrefix(lowerTeam + ".") {
-                let suffix = String(lower.dropFirst(lowerTeam.count + 1))
-                let normSuffix = AppCatalogService.normalizeToken(suffix)
-                let mentionsThisApp = nameVariants.contains { variant in
-                    variant.normalized.count >= 4 && normSuffix.contains(variant.normalized)
+                let afterTeam = String(lower.dropFirst(lowerTeam.count + 1))
+                let isExactBundleMatch = exactBundleIDs.contains { lowerBundle in
+                    !lowerBundle.isEmpty && (afterTeam == lowerBundle || afterTeam.hasPrefix(lowerBundle + "."))
                 }
-                if mentionsThisApp || !hasSiblingTeamApps {
+                if isExactBundleMatch {
                     addCandidate(entry, .containers, .exact, "Team Group Container (\(teamID!))", true)
                 } else {
                     addCandidate(
@@ -814,7 +852,7 @@ enum DeepFileScanner {
 
             if itemWords.count > variant.words.count,
                !variant.words.isEmpty,
-               itemWords.starts(with: variant.words) {
+               (variant.words.count >= 2 || variant.normalized.count >= 8) && itemWords.starts(with: variant.words) {
                 if systemIndex.allKnownAppNamesNormalized.contains(itemNorm) && itemNorm != variant.normalized {
                     continue
                 }
@@ -874,7 +912,7 @@ enum DeepFileScanner {
             return true
         }
         if path != target.path {
-            if path.hasPrefix("/System/") || path.hasPrefix("/usr/") || path.hasPrefix("/bin/") || path.hasPrefix("/sbin/") {
+            if isProtectedPath(path) {
                 return true
             }
             let lowerName = (path as NSString).lastPathComponent.lowercased()

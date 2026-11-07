@@ -484,6 +484,10 @@ struct RestorableFileEntry: Codable, Hashable, Sendable, Identifiable {
     let categoryRaw: String
     let sizeBytes: Int64
     var isRestored: Bool
+
+    var wasPermanentlyDeleted: Bool {
+        trashedPath == nil
+    }
 }
 
 struct UninstallHistoryRecord: Codable, Identifiable, Hashable, Sendable {

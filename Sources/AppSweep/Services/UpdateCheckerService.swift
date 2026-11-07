@@ -67,7 +67,7 @@ final class UpdateCheckerService: ObservableObject {
     }
 
     var currentVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.3.1"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.3.2"
     }
 
     private var lastSilentCheckTime: CFAbsoluteTime = 0
@@ -622,10 +622,17 @@ final class UpdateCheckerService: ObservableObject {
         done
 
         DST_PARENT="$(dirname "$DST_APP")"
+        SWAP_OK=0
         if [ -w "$DST_PARENT" ] && { [ ! -e "$DST_APP" ] || [ -w "$DST_APP" ]; } && rm -rf "$DST_APP" 2>/dev/null && /usr/bin/ditto --noextattr "$SRC_APP" "$DST_APP" 2>/dev/null; then
             /usr/bin/xattr -cr "$DST_APP" 2>/dev/null || true
+            SWAP_OK=1
         else
-            /usr/bin/osascript -e "do shell script \\"rm -rf '$DST_APP' && /usr/bin/ditto --noextattr '$SRC_APP' '$DST_APP' && /usr/bin/xattr -cr '$DST_APP'\\" with administrator privileges" 2>/dev/null || true
+            if SRC_APP="$SRC_APP" DST_APP="$DST_APP" /usr/bin/osascript \
+                -e 'set srcPath to system attribute "SRC_APP"' \
+                -e 'set dstPath to system attribute "DST_APP"' \
+                -e 'do shell script "/bin/rm -rf " & quoted form of dstPath & " && /usr/bin/ditto --noextattr " & quoted form of srcPath & " " & quoted form of dstPath & " && /usr/bin/xattr -cr " & quoted form of dstPath with administrator privileges' >/dev/null 2>&1; then
+                SWAP_OK=1
+            fi
         fi
 
         if [ -n "$DST_SECONDARY" ] && [ -d "$DST_SECONDARY" ]; then
@@ -633,7 +640,9 @@ final class UpdateCheckerService: ObservableObject {
             /usr/bin/xattr -cr "$DST_SECONDARY" 2>/dev/null || true
         fi
 
-        /usr/bin/open "$DST_APP"
+        if [ "$SWAP_OK" -eq 1 ] && [ -d "$DST_APP" ]; then
+            /usr/bin/open "$DST_APP"
+        fi
         rm -rf "$STAGE_DIR"
         """
 

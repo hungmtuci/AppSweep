@@ -271,37 +271,35 @@ enum UninstallEngine {
         // 5. Execute single Touch ID / Admin prompt if privileged items exist
         if !adminQueue.isEmpty {
             let gid = getgid()
-            var scriptLines: [String] = ["set -e"]
+            var scriptLines: [String] = []
 
             for (item, destPath) in adminQueue {
                 if item.category == .launchDaemons && item.path.hasPrefix("/Library/") {
                     scriptLines.append("/bin/launchctl bootout system \(shellQuote(item.path)) 2>/dev/null || true")
                 }
                 if mode == .moveToTrash, let destPath {
-                    scriptLines.append("/bin/mv -f \(shellQuote(item.path)) \(shellQuote(destPath))")
+                    scriptLines.append("/bin/mv -f \(shellQuote(item.path)) \(shellQuote(destPath)) 2>/dev/null || true")
                     scriptLines.append("/usr/sbin/chown -R \(uid):\(gid) \(shellQuote(destPath)) 2>/dev/null || true")
                 } else {
-                    scriptLines.append("/bin/rm -rf \(shellQuote(item.path))")
+                    scriptLines.append("/bin/rm -rf \(shellQuote(item.path)) 2>/dev/null || true")
                 }
             }
 
             let joinedScript = scriptLines.joined(separator: " ; ")
-            if runElevatedShellScript(joinedScript) {
-                for (item, destPath) in adminQueue {
-                    if !fm.fileExists(atPath: item.path) {
-                        entries.append(RestorableFileEntry(
-                            originalPath: item.path,
-                            trashedPath: destPath,
-                            categoryRaw: item.category.rawValue,
-                            sizeBytes: item.sizeBytes,
-                            isRestored: false
-                        ))
-                    } else {
-                        failedPaths.append(item.path)
-                    }
-                }
-            } else {
-                for (item, _) in adminQueue {
+            _ = runElevatedShellScript(joinedScript)
+            for (item, destPath) in adminQueue {
+                let succeeded = (destPath != nil)
+                    ? fm.fileExists(atPath: destPath!)
+                    : !fm.fileExists(atPath: item.path)
+                if succeeded {
+                    entries.append(RestorableFileEntry(
+                        originalPath: item.path,
+                        trashedPath: destPath,
+                        categoryRaw: item.category.rawValue,
+                        sizeBytes: item.sizeBytes,
+                        isRestored: false
+                    ))
+                } else {
                     failedPaths.append(item.path)
                 }
             }
@@ -488,22 +486,20 @@ enum UninstallEngine {
             }
 
             let joined = scriptLines.joined(separator: " ; ")
-            if runElevatedShellScript(joined) {
-                for (stateIdx, item, destPath) in globalAdminQueue {
-                    if !fm.fileExists(atPath: item.path) {
-                        states[stateIdx].entries.append(RestorableFileEntry(
-                            originalPath: item.path,
-                            trashedPath: destPath,
-                            categoryRaw: item.category.rawValue,
-                            sizeBytes: item.sizeBytes,
-                            isRestored: false
-                        ))
-                    } else {
-                        states[stateIdx].failedPaths.append(item.path)
-                    }
-                }
-            } else {
-                for (stateIdx, item, _) in globalAdminQueue {
+            _ = runElevatedShellScript(joined)
+            for (stateIdx, item, destPath) in globalAdminQueue {
+                let succeeded = (destPath != nil)
+                    ? fm.fileExists(atPath: destPath!)
+                    : !fm.fileExists(atPath: item.path)
+                if succeeded {
+                    states[stateIdx].entries.append(RestorableFileEntry(
+                        originalPath: item.path,
+                        trashedPath: destPath,
+                        categoryRaw: item.category.rawValue,
+                        sizeBytes: item.sizeBytes,
+                        isRestored: false
+                    ))
+                } else {
                     states[stateIdx].failedPaths.append(item.path)
                 }
             }
@@ -634,6 +630,7 @@ enum UninstallEngine {
             if record.entries[idx].isRestored { continue }
             guard let trashed = record.entries[idx].trashedPath, fm.fileExists(atPath: trashed) else { continue }
             let orig = record.entries[idx].originalPath
+            guard isSafeForDeletion(orig) else { continue }
             let origParent = (orig as NSString).deletingLastPathComponent
 
             do {
@@ -646,25 +643,29 @@ enum UninstallEngine {
                 try fm.moveItem(atPath: trashed, toPath: orig)
                 record.entries[idx].isRestored = true
             } catch {
-                adminRestoreCommands.append("/bin/mkdir -p \(shellQuote(origParent))")
-                adminRestoreCommands.append("/bin/rm -rf \(shellQuote(orig))")
-                adminRestoreCommands.append("/bin/mv -f \(shellQuote(trashed)) \(shellQuote(orig))")
+                adminRestoreCommands.append("/bin/mkdir -p \(shellQuote(origParent)) 2>/dev/null || true")
+                adminRestoreCommands.append("/bin/rm -rf \(shellQuote(orig)) 2>/dev/null || true")
+                adminRestoreCommands.append("/bin/mv -f \(shellQuote(trashed)) \(shellQuote(orig)) 2>/dev/null || true")
+                if orig.hasPrefix("/Library/") || orig.hasPrefix("/System/") {
+                    adminRestoreCommands.append("/usr/sbin/chown -R 0:0 \(shellQuote(orig)) 2>/dev/null || true")
+                }
                 pendingAdminIndices.append(idx)
             }
         }
 
         if !adminRestoreCommands.isEmpty {
             let script = adminRestoreCommands.joined(separator: " ; ")
-            if runElevatedShellScript(script) {
-                for idx in pendingAdminIndices {
-                    if fm.fileExists(atPath: record.entries[idx].originalPath) {
-                        record.entries[idx].isRestored = true
-                    }
+            _ = runElevatedShellScript(script)
+            for idx in pendingAdminIndices {
+                if fm.fileExists(atPath: record.entries[idx].originalPath) {
+                    record.entries[idx].isRestored = true
                 }
             }
         }
 
-        let allDone = record.entries.allSatisfy(\.isRestored)
+        let allDone = record.entries.allSatisfy {
+            $0.isRestored || $0.wasPermanentlyDeleted || ($0.trashedPath != nil && !fm.fileExists(atPath: $0.trashedPath!))
+        }
         record.isFullyRestored = allDone
 
         if allDone, let container = record.trashContainerPath {
@@ -768,20 +769,25 @@ enum UninstallEngine {
 
     // MARK: - Utilities & Security Guards
 
-    private static func isSafeForDeletion(_ path: String) -> Bool {
-        let std = URL(fileURLWithPath: path).standardizedFileURL.path
-        let home = NSHomeDirectory()
-        let forbiddenExact: Set<String> = [
-            "/", "/System", "/Applications", "/Library", "/Users",
-            "/bin", "/sbin", "/usr", "/var", "/private", home,
-            "\(home)/Library", "\(home)/Desktop", "\(home)/Documents", "\(home)/Downloads"
-        ]
-        if forbiddenExact.contains(std) { return false }
-        if std.hasPrefix("/System/") || std.hasPrefix("/bin/") || std.hasPrefix("/sbin/") || std.hasPrefix("/usr/bin/") || std.hasPrefix("/usr/lib/") {
-            return false
+    static func isSafeForDeletion(_ path: String) -> Bool {
+        let url = URL(fileURLWithPath: path)
+        let candidates = Set([
+            url.standardizedFileURL.path,
+            url.resolvingSymlinksInPath().standardizedFileURL.path
+        ])
+        for candidate in candidates {
+            if DeepFileScanner.shared.isProtectedPath(candidate) {
+                return false
+            }
+            let comps = candidate.split(separator: "/")
+            if comps.count < 2 {
+                return false
+            }
+            if (comps.first == "Users" || comps.first == "Library" || comps.first == "System") && comps.count < 3 {
+                return false
+            }
         }
-        let components = std.split(separator: "/")
-        return components.count >= 2
+        return true
     }
 
     private static func shellQuote(_ raw: String) -> String {

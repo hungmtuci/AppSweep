@@ -117,12 +117,14 @@ final class MainViewModel: ObservableObject {
         "plist", "bom", "log", "ips", "diag", "crash", "out", "err", "json", "txt", "db", "sqlite", "binarycookies", "sfl2", "sfl3"
     ]
 
-    private var scanTargetTask: Task<Void, Never>?
+    private var activeScanTask: Task<Void, Never>?
+    private var catalogLoadTask: Task<Void, Never>?
     private var sizeCalcTask: Task<Void, Never>?
     private var batchScanCoordinatorTask: Task<Void, Never>?
     private var queuedBatchBundles: [String: TargetBundle] = [:]
     private var orphanScanTask: Task<Void, Never>?
     private var toastDismissTask: Task<Void, Never>?
+    private var workspaceObserverTokens: [NSObjectProtocol] = []
 
     @Published private(set) var runningBundleIDs: Set<String> = []
     @Published private(set) var runningBundlePaths: Set<String> = []
@@ -153,14 +155,17 @@ final class MainViewModel: ObservableObject {
         refreshRunningAppsSnapshot()
         historyRecords = UninstallEngine.loadHistory()
         isLoadingCatalog = true
+        catalogLoadTask?.cancel()
         sizeCalcTask?.cancel()
 
-        Task {
+        catalogLoadTask = Task {
             let (index, scannedAddons) = await Task.detached(priority: .userInitiated) {
                 async let idx = AppCatalogService.scanInstalledApps()
                 async let add = AppCatalogService.scanAddons()
                 return await (idx, add)
             }.value
+
+            guard !Task.isCancelled else { return }
 
             self.systemIndex = index
             self.isSuppressingDerivedRebuild = true
@@ -308,19 +313,21 @@ final class MainViewModel: ObservableObject {
     // MARK: - Running Apps Live Monitor
 
     private func startRunningMonitor() {
+        guard workspaceObserverTokens.isEmpty else { return }
         let nc = NSWorkspace.shared.notificationCenter
-        nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+        let launchToken = nc.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshRunningAppsSnapshot()
                 self?.rebuildAppCatalogDerivedState()
             }
         }
-        nc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+        let terminateToken = nc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshRunningAppsSnapshot()
                 self?.rebuildAppCatalogDerivedState()
             }
         }
+        workspaceObserverTokens = [launchToken, terminateToken]
     }
 
     func refreshRunningAppsSnapshot() {
@@ -539,14 +546,18 @@ final class MainViewModel: ObservableObject {
 
     // MARK: - Deep Scan Target Selection
 
+    func selectAndScanApp(_ target: TargetBundle) {
+        selectTarget(target)
+    }
+
     func selectTarget(_ target: TargetBundle) {
         selectedTarget = target
-        scanTargetTask?.cancel()
+        activeScanTask?.cancel()
         isScanningTarget = true
         associatedItems = []
 
         let indexSnapshot = systemIndex
-        scanTargetTask = Task {
+        activeScanTask = Task {
             let items = await Task.detached(priority: .userInitiated) {
                 DeepFileScanner.scanAssociatedFiles(for: target, systemIndex: indexSnapshot)
             }.value

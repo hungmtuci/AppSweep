@@ -534,28 +534,55 @@ enum AppCatalogService {
         return nil
     }
 
+    static func detectArchitecture(at executableURL: URL) -> AppArchitecture {
+        detectMachOArchitecture(at: executableURL)
+    }
+
     private static func detectMachOArchitecture(at executableURL: URL) -> AppArchitecture {
         let fd = open(executableURL.path, O_RDONLY)
         guard fd >= 0 else { return .unknown }
         defer { close(fd) }
 
-        var header = [UInt8](repeating: 0, count: 8)
-        let bytesRead = read(fd, &header, 8)
-        guard bytesRead == 8 else { return .unknown }
+        var header = [UInt8](repeating: 0, count: 520)
+        let bytesRead = read(fd, &header, header.count)
+        guard bytesRead >= 8 else { return .unknown }
 
         let magic = header.withUnsafeBytes { $0.load(as: UInt32.self) }
         switch magic {
         case 0xCAFEBABE, 0xBEBAFECA, 0xCAFEBABF, 0xBFBAFECA:
+            let isSwapped = (magic == 0xBEBAFECA || magic == 0xBFBAFECA)
+            let is64 = (magic == 0xCAFEBABF || magic == 0xBFBAFECA)
+            let rawNArch = header.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self) }
+            let nArch = Int(isSwapped ? rawNArch.byteSwapped : rawNArch)
+            let strideSize = is64 ? 32 : 20
+            let maxSlices = min(max(nArch, 0), 16)
+
+            var hasArm64 = false
+            var hasX86 = false
+            for i in 0..<maxSlices {
+                let offset = 8 + i * strideSize
+                guard offset + 4 <= bytesRead else { break }
+                let rawCPU = header.withUnsafeBytes { $0.load(fromByteOffset: offset, as: UInt32.self) }
+                let cpu = isSwapped ? rawCPU.byteSwapped : rawCPU
+                if cpu == 0x0100_000C || (cpu & 0x00FF_FFFF) == 12 {
+                    hasArm64 = true
+                } else if cpu == 0x0100_0007 || (cpu & 0x00FF_FFFF) == 7 {
+                    hasX86 = true
+                }
+            }
+            if hasArm64 && hasX86 { return .universal }
+            if hasArm64 { return .appleSilicon }
+            if hasX86 { return .intel }
             return .universal
         case 0xFEEDFACF, 0xFEEDFACE:
-            let cpuType = header.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Int32.self) }
-            if (cpuType & 0x00FF_FFFF) == 12 { return .appleSilicon }
-            if (cpuType & 0x00FF_FFFF) == 7 { return .intel }
+            let cpuType = header.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self) }
+            if cpuType == 0x0100_000C || (cpuType & 0x00FF_FFFF) == 12 { return .appleSilicon }
+            if cpuType == 0x0100_0007 || (cpuType & 0x00FF_FFFF) == 7 { return .intel }
             return .unknown
         case 0xCFFAEDFE, 0xCEFAEDFE:
             let swapped = header.withUnsafeBytes { $0.load(fromByteOffset: 4, as: UInt32.self).byteSwapped }
-            if (swapped & 0x00FF_FFFF) == 12 { return .appleSilicon }
-            if (swapped & 0x00FF_FFFF) == 7 { return .intel }
+            if swapped == 0x0100_000C || (swapped & 0x00FF_FFFF) == 12 { return .appleSilicon }
+            if swapped == 0x0100_0007 || (swapped & 0x00FF_FFFF) == 7 { return .intel }
             return .unknown
         default:
             return .unknown
