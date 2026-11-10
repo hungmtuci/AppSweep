@@ -144,6 +144,14 @@ final class AppSweepDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
         )
         refreshItem.target = self
 
+        let diskItem = fileMenu.addItem(
+            withTitle: "Phân tích dung lượng ổ đĩa",
+            action: #selector(analyzeDiskSpaceFromMenu),
+            keyEquivalent: "d"
+        )
+        diskItem.keyEquivalentModifierMask = [.command, .shift]
+        diskItem.target = self
+
         let orphanItem = fileMenu.addItem(
             withTitle: "Quét file rác mồ côi",
             action: #selector(scanOrphansFromMenu),
@@ -198,6 +206,12 @@ final class AppSweepDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
 
     @objc private func reloadCatalogFromMenu() {
         MainViewModel.shared.reloadAllCatalogs()
+    }
+
+    @objc private func analyzeDiskSpaceFromMenu() {
+        openOrFocusMainWindow()
+        MainViewModel.shared.activeSection = .diskAnalyzer
+        MainViewModel.shared.diskAnalyzer.startScanIfNeeded()
     }
 
     @objc private func scanOrphansFromMenu() {

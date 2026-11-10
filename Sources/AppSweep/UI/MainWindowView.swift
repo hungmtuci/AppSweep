@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 struct MainWindowView: View {
     @ObservedObject var viewModel: MainViewModel
+    @ObservedObject var diskAnalyzer: DiskAnalyzerViewModel = MainViewModel.shared.diskAnalyzer
     @ObservedObject var updateService: UpdateCheckerService = .shared
 
     var body: some View {
@@ -98,6 +99,8 @@ struct MainWindowView: View {
         switch section {
         case .apps:
             return viewModel.installedApps.isEmpty ? nil : "\(viewModel.installedApps.count)"
+        case .diskAnalyzer:
+            return diskAnalyzer.recommendations.isEmpty ? nil : "\(diskAnalyzer.recommendations.count)"
         case .dropZone:
             return nil
         case .addons:
@@ -310,6 +313,8 @@ struct MainWindowView: View {
         switch viewModel.activeSection {
         case .apps:
             InstalledAppsView(viewModel: viewModel)
+        case .diskAnalyzer:
+            DiskSpaceAnalyzerView(viewModel: viewModel, analyzer: diskAnalyzer)
         case .dropZone:
             DropZoneView(viewModel: viewModel)
         case .addons:

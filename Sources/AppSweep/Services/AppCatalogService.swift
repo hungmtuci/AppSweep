@@ -17,6 +17,25 @@ enum DiskSizeCalculator {
         allocatedSize(atPath: url.path)
     }
 
+    /// Computes physical bytes occupied on local storage for a `stat` record:
+    /// - Returns `0` for evicted cloud/iCloud dataless placeholders (`SF_DATALESS`).
+    /// - Uses `st_blocks * 512` whenever physical blocks are allocated.
+    /// - Falls back to `st_size` only for inline APFS compressed files (`UF_COMPRESSED`) or tiny inline files (`<= 4096` bytes), avoiding sparse-file inflation.
+    @inline(__always)
+    static func physicalBytes(from st: stat) -> Int64 {
+        if (st.st_flags & UInt32(SF_DATALESS)) != 0 {
+            return 0
+        }
+        let blocksBytes = Int64(st.st_blocks) * 512
+        if blocksBytes > 0 {
+            return blocksBytes
+        }
+        if (st.st_flags & UInt32(UF_COMPRESSED)) != 0 || st.st_size <= 4096 {
+            return max(0, Int64(st.st_size))
+        }
+        return 0
+    }
+
     static func allocatedSize(atPath path: String) -> Int64 {
         var rootStat = stat()
         guard lstat(path, &rootStat) == 0 else { return 0 }
@@ -26,8 +45,7 @@ enum DiskSizeCalculator {
             return max(0, Int64(rootStat.st_size))
         }
         if modeType != S_IFDIR {
-            let blocksBytes = Int64(rootStat.st_blocks) * 512
-            return blocksBytes > 0 ? blocksBytes : max(0, Int64(rootStat.st_size))
+            return physicalBytes(from: rootStat)
         }
 
         guard let cPath = strdup(path) else { return 0 }
@@ -59,8 +77,7 @@ enum DiskSizeCalculator {
                         continue
                     }
                 }
-                let blocksBytes = Int64(stPtr.pointee.st_blocks) * 512
-                total += (blocksBytes > 0) ? blocksBytes : max(0, Int64(stPtr.pointee.st_size))
+                total += physicalBytes(from: stPtr.pointee)
             } else if (info == FTS_SL || info == FTS_SLNONE), let stPtr = entry.pointee.fts_statp {
                 total += max(0, Int64(stPtr.pointee.st_size))
             }

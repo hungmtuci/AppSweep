@@ -610,6 +610,64 @@ enum UninstallEngine {
         return result.record
     }
 
+    // MARK: - Clean Disk Space Analyzer Items (Recommendations & Selected Folders)
+
+    static func cleanDiskAnalysisItems(
+        items: [DiskCleanupSuggestion],
+        mode: RemovalMode,
+        createZipBackup: Bool = false
+    ) throws -> UninstallHistoryRecord {
+        // Deduplicate & prune nested paths so moving an ancestor folder never collides with moving its child
+        let sortedByDepth = items
+            .filter { !DiskSpaceAnalyzerService.isProtectedFromCleanup($0.path) }
+            .sorted { $0.path.count < $1.path.count }
+
+        var pruned: [DiskCleanupSuggestion] = []
+        var keptDirPrefixes: [String] = []
+        var seenExact = Set<String>()
+
+        for item in sortedByDepth {
+            guard seenExact.insert(item.path).inserted else { continue }
+            if keptDirPrefixes.contains(where: { item.path.hasPrefix($0) }) {
+                continue
+            }
+            if item.isDirectory {
+                keptDirPrefixes.append(item.path.hasSuffix("/") ? item.path : (item.path + "/"))
+            }
+            pruned.append(item)
+        }
+
+        let mapped: [AssociatedFileItem] = pruned.map { entry in
+            AssociatedFileItem(
+                id: entry.path,
+                path: entry.path,
+                name: (entry.path as NSString).lastPathComponent,
+                category: entry.ruleKind.mappedFileCategory,
+                sizeBytes: entry.sizeBytes,
+                confidence: entry.safety == .safeRecreate ? .exact : .strong,
+                matchReason: entry.reason,
+                requiresAdmin: entry.requiresAdmin,
+                isDirectory: entry.isDirectory,
+                isSelected: true
+            )
+        }
+
+        let title = pruned.count == 1
+            ? "Dọn ổ đĩa: \(pruned[0].title)"
+            : "Dọn ổ đĩa (\(pruned.count) mục)"
+
+        let result = try performUninstall(
+            target: nil,
+            items: mapped,
+            mode: mode,
+            createZipBackup: createZipBackup,
+            cleanDockIcon: false,
+            customRecordTitle: title,
+            customBundleID: "disk.analyzer.cleanup"
+        )
+        return result.record
+    }
+
     // MARK: - 1-Click Undo / Restore from Trash (AppDelete Undo feature)
 
     static func restoreUninstallRecord(_ recordID: UUID) throws -> UninstallHistoryRecord {

@@ -22,6 +22,9 @@
     9. `~/Library/Logs` & `DiagnosticReports` (Crash / `.ips`)
     10. Biên lai cài đặt `.pkg` tại `/private/var/db/receipts`
     11. Thư mục cấu hình ẩn `~/.config`, `~/.cache`, `~/.local/share` và `~/.<app>`
+- **Phân tích dung lượng ổ đĩa & Đề xuất dọn dẹp thông minh (`DiskSpaceAnalyzerService`)**:
+  - Dựng **Sơ đồ không gian ổ đĩa Treemap tỷ lệ thực** (thuật toán Squarified Treemap) bằng luồng C/POSIX `fts_open` đa nhân, hỗ trợ nhấp đúp đi sâu không giới hạn cấp thư mục (hoặc kéo thả bất kỳ thư mục nào vào ứng dụng).
+  - Tự động phát hiện và phân loại mức độ an toàn (**An toàn cao — Tự tạo lại** vs **Cần xem trước**) cho các điểm nghẽn chiếm bộ nhớ: `~/Library/Caches`, `Xcode DerivedData / DeviceSupport / Archives`, `Homebrew / npm / pip / uv / pnpm / Cargo / Gradle`, thư mục build dự án (`node_modules`, `.build`, `target`, `.next`), bộ cài cũ trong `~/Downloads` (`.dmg`, `.pkg`, `.iso`) và tệp đơn lẻ `≥ 500 MB`.
 - **Chọn nhiều & Gỡ cài đặt hàng loạt (`Batch Uninstall`)**:
   - Tích chọn cùng lúc nhiều ứng dụng để quét sâu song song, xem tổng dung lượng thu hồi của cả lô, mở rộng kiểm tra chi tiết từng file của từng ứng dụng.
   - Gộp quyền quản trị: chỉ hỏi xác thực **Touch ID / Mật khẩu Admin đúng 1 lần duy nhất** cho toàn bộ lô ứng dụng được chọn.
@@ -48,6 +51,7 @@
 | :--- | :--- |
 | `⌘ + O` | Chọn một hoặc nhiều ứng dụng `.app` / Plugin từ Finder để quét sâu |
 | `⌘ + R` | Làm mới danh sách ứng dụng & dữ liệu mức độ sử dụng |
+| `⇧ + ⌘ + D` | Chuyển nhanh sang tab **Phân tích dung lượng ổ đĩa (Treemap & Đề xuất dọn)** |
 | `⇧ + ⌘ + F` | Chuyển nhanh sang tab **Quét file rác mồ côi (Orphans)** |
 | `⌘ + U` | Kiểm tra và tải bản cập nhật mới nhất từ GitHub |
 | `⌘ + 1` | Mở lại cửa sổ chính `AppSweep` |
@@ -58,8 +62,8 @@
 ## 📥 Tải về & Cài đặt nhanh (macOS 14.0+ Universal: Apple Silicon & Intel)
 
 1. Tải bộ cài mới nhất tại trang **[Releases](https://github.com/hungmtuci/AppSweep/releases/latest)**:
-   - **`AppSweep-Installer-v1.3.1.dmg`** *(Khuyên dùng)*
-   - Hoặc **`AppSweep-v1.3.1-macOS.zip`**
+   - **`AppSweep-Installer-v1.4.0.dmg`** *(Khuyên dùng)*
+   - Hoặc **`AppSweep-v1.4.0-macOS.zip`**
 2. Mở file `.dmg`:
    - Kéo `AppSweep.app` thả vào thư mục **`Applications`**, **HOẶC** nhấp chuột phải vào `Cai_Dat_AppSweep.command` → chọn **Open** để tự động cài đặt vào `/Applications` và gỡ cờ cách ly Gatekeeper.
 3. Nếu macOS báo ứng dụng chưa công chứng Apple Developer ID khi mở lần đầu trên máy mới, chạy lệnh sau trong Terminal:

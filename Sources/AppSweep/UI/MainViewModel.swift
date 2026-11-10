@@ -19,6 +19,7 @@ final class MainViewModel: ObservableObject {
     // Navigation & Global State
     @Published var activeSection: NavigationSection = .apps
     @Published var hasFullDiskAccess: Bool = PermissionService.hasFullDiskAccess()
+    let diskAnalyzer = DiskAnalyzerViewModel()
 
     // Raw Catalogs
     @Published var installedApps: [TargetBundle] = [] {
@@ -612,9 +613,24 @@ final class MainViewModel: ObservableObject {
         }
 
         guard !validBundles.isEmpty else {
+            // If the user dropped a regular directory, analyze its disk space & cleanup suggestions directly!
+            if let firstDir = urls.map(\.standardizedFileURL).first(where: { url in
+                var isDir: ObjCBool = false
+                return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+            }) {
+                activeSection = .diskAnalyzer
+                diskAnalyzer.scanCustomDirectoryURL(firstDir)
+                showToast(
+                    title: "Đang phân tích thư mục \(firstDir.lastPathComponent)",
+                    subtitle: "Đang dựng sơ đồ dung lượng và tìm các thư mục có thể dọn dẹp.",
+                    isError: false
+                )
+                return true
+            }
+
             showToast(
                 title: "Không hỗ trợ định dạng này",
-                subtitle: "Vui lòng thả gói ứng dụng (.app) hoặc tiện ích (.prefPane, .saver, .qlgenerator, .plugin, .vst3).",
+                subtitle: "Vui lòng thả gói ứng dụng (.app), Plugin hoặc một thư mục bất kỳ để phân tích dung lượng.",
                 isError: true
             )
             return false

@@ -3,6 +3,7 @@ import SwiftUI
 
 enum NavigationSection: String, CaseIterable, Identifiable {
     case apps = "apps"
+    case diskAnalyzer = "diskAnalyzer"
     case dropZone = "dropZone"
     case addons = "addons"
     case orphans = "orphans"
@@ -13,6 +14,7 @@ enum NavigationSection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .apps: return "Ứng dụng đã cài"
+        case .diskAnalyzer: return "Phân tích ổ đĩa"
         case .dropZone: return "Kéo & Thả nhanh"
         case .addons: return "Tiện ích & Plugin"
         case .orphans: return "File rác mồ côi"
@@ -23,6 +25,7 @@ enum NavigationSection: String, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .apps: return "Quét sâu & gỡ bỏ triệt để ứng dụng"
+        case .diskAnalyzer: return "Sơ đồ dung lượng thư mục & đề xuất dọn dẹp"
         case .dropZone: return "Thả ứng dụng hoặc plugin bất kỳ để gỡ"
         case .addons: return "PrefPanes, QuickLook, Screen Savers, Audio"
         case .orphans: return "Dữ liệu sót lại từ ứng dụng đã xóa trước đó"
@@ -33,6 +36,7 @@ enum NavigationSection: String, CaseIterable, Identifiable {
     var symbolName: String {
         switch self {
         case .apps: return "square.grid.2x2"
+        case .diskAnalyzer: return "internaldrive"
         case .dropZone: return "arrow.down.app"
         case .addons: return "puzzlepiece.extension"
         case .orphans: return "tray.full"
