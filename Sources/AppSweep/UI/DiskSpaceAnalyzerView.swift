@@ -58,6 +58,31 @@ struct DiskSpaceAnalyzerView: View {
         } message: {
             Text(cleanupConfirmationMessage)
         }
+        .confirmationDialog(
+            "Xóa trực tiếp '\(analyzer.pendingDirectTrashNode?.name ?? "")'?",
+            isPresented: $analyzer.showDirectTrashConfirmation,
+            titleVisibility: .visible
+        ) {
+            if let pending = analyzer.pendingDirectTrashNode {
+                Button(
+                    "\(viewModel.removalMode == .moveToTrash ? "Chuyển vào Thùng rác" : "Xóa vĩnh viễn") (\(ByteFormatter.string(pending.sizeBytes)))",
+                    role: .destructive
+                ) {
+                    analyzer.executeDirectTrash(mainViewModel: viewModel)
+                }
+            }
+            Button("Hủy", role: .cancel) {
+                analyzer.pendingDirectTrashNode = nil
+            }
+        } message: {
+            if let pending = analyzer.pendingDirectTrashNode {
+                Text(
+                    viewModel.removalMode == .moveToTrash
+                    ? "Mục '\(pending.displayPath)' (\(ByteFormatter.string(pending.sizeBytes))) sẽ được chuyển vào gói an toàn trong Thùng rác và hỗ trợ Hoàn tác 1 chạm."
+                    : "Cảnh báo: '\(pending.displayPath)' (\(ByteFormatter.string(pending.sizeBytes))) sẽ bị xóa vĩnh viễn khỏi ổ đĩa."
+                )
+            }
+        }
     }
 
     // MARK: - 1. Top Scope Presets & Volume Capacity Header
@@ -348,7 +373,9 @@ struct DiskSpaceAnalyzerView: View {
     }
 
     private func treemapVisualPane(current: DiskSpaceNode) -> some View {
-        let highlightedNode: DiskSpaceNode? = current.children.first(where: { $0.id == analyzer.highlightedNodeID })
+        let activeInspectID = analyzer.hoveredNodeID ?? analyzer.highlightedNodeID
+        let highlightedNode: DiskSpaceNode? = current.children.first(where: { $0.id == activeInspectID })
+            ?? current.children.first(where: { $0.id == analyzer.highlightedNodeID })
             ?? current.children.first
 
         return VStack(alignment: .leading, spacing: 10) {
@@ -363,7 +390,7 @@ struct DiskSpaceAnalyzerView: View {
                             .font(.system(size: 14, weight: .semibold).monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
-                    Text("\(current.displayPath) · \(current.children.count) mục trực tiếp")
+                    Text("\(current.displayPath) · Nhấp chọn, nhấp đúp để mở, chuột phải để thao tác nhanh")
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
@@ -412,13 +439,15 @@ struct DiskSpaceAnalyzerView: View {
                         children: current.children,
                         in: CGRect(origin: .zero, size: geo.size),
                         parentPath: current.path,
-                        cleanablePathPrefixes: analyzer.cleanablePathPrefixes
+                        recommendations: analyzer.recommendations,
+                        maxVisibleTiles: analyzer.maxVisibleTiles
                     )
                     ZStack(alignment: .topLeading) {
                         ForEach(tiles) { tile in
                             treemapTileView(tile)
                         }
                     }
+                    .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(3)
@@ -439,32 +468,38 @@ struct DiskSpaceAnalyzerView: View {
     }
 
     private func treemapTileView(_ tile: TreemapTile) -> some View {
-        let insetRect = tile.rect.insetBy(dx: 1.2, dy: 1.2)
+        let insetRect = tile.rect.insetBy(dx: 1.25, dy: 1.25)
         let w = max(0, insetRect.width)
         let h = max(0, insetRect.height)
         let isSelected = (analyzer.highlightedNodeID == tile.node.id)
+        let isHovered = (analyzer.hoveredNodeID == tile.id)
+        let isInteractiveFocus = isSelected || isHovered
         let isMarkedCleanup = !tile.node.isSyntheticOther && analyzer.isPathSelectedForCleanup(tile.node.path)
         let pctString = String(format: "%.1f%%", tile.fractionOfParent * 100.0)
 
         let baseFill: Color = {
             if tile.node.isSyntheticOther {
-                return Color.primary.opacity(0.055)
+                return Color.primary.opacity(isHovered ? 0.095 : 0.055)
             }
             if isMarkedCleanup {
-                return Color.accentColor.opacity(0.32)
+                return Color.accentColor.opacity(isHovered ? 0.36 : 0.28)
             }
             if tile.hasCleanableContent {
-                return Color.orange.opacity(isSelected ? 0.24 : 0.14)
+                return Color.orange.opacity(isInteractiveFocus ? 0.23 : 0.14)
             }
             let tierOpacity = max(0.08, 0.24 - Double(min(tile.rankIndex, 10)) * 0.014)
+            let boost = isInteractiveFocus ? 0.065 : 0.0
             return tile.node.isDirectory
-                ? Color.accentColor.opacity(isSelected ? tierOpacity + 0.08 : tierOpacity)
-                : Color.primary.opacity(isSelected ? 0.14 : 0.08)
+                ? Color.accentColor.opacity(tierOpacity + boost)
+                : Color.primary.opacity(isInteractiveFocus ? 0.14 : 0.08)
         }()
 
         let borderColor: Color = {
-            if isSelected {
+            if isSelected || isMarkedCleanup {
                 return Color.accentColor
+            }
+            if isHovered {
+                return Color.primary.opacity(0.45)
             }
             if tile.hasCleanableContent {
                 return Color.orange.opacity(0.45)
@@ -472,60 +507,312 @@ struct DiskSpaceAnalyzerView: View {
             return Color(nsColor: .separatorColor).opacity(0.85)
         }()
 
+        let showInlineActionBar = isInteractiveFocus && w >= 104 && h >= 68
+        let showNestedChildPills = w >= 185 && h >= 128 && !tile.node.children.isEmpty && !tile.node.isPackageBundle && !tile.node.isSyntheticOther
+
         return ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 4)
+            RoundedRectangle(cornerRadius: 5)
                 .fill(baseFill)
 
-            RoundedRectangle(cornerRadius: 4)
-                .strokeBorder(borderColor, lineWidth: isSelected ? 1.8 : 0.8)
+            RoundedRectangle(cornerRadius: 5)
+                .strokeBorder(borderColor, lineWidth: (isSelected || isMarkedCleanup) ? 1.8 : (isHovered ? 1.2 : 0.8))
 
-            if w >= 52 && h >= 28 {
-                VStack(alignment: .leading, spacing: 2) {
+            if w >= 50 && h >= 26 {
+                VStack(alignment: .leading, spacing: 3) {
+                    // 1. Header Row: Icon + Name + Direct Checkbox / Lock
                     HStack(spacing: 4) {
-                        if w >= 78 {
+                        if w >= 74 {
                             Image(systemName: tile.node.isSyntheticOther
-                                  ? "ellipsis.circle"
+                                  ? "plus.square.on.square"
                                   : (tile.node.isAppBundle ? "app" : (tile.node.isDirectory ? "folder" : "doc")))
-                                .font(.system(size: 10))
+                                .font(.system(size: 10.5))
                                 .foregroundStyle(.secondary)
                         }
                         Text(tile.node.name)
-                            .font(.system(size: w >= 110 && h >= 54 ? 11.5 : 10.5, weight: .medium))
+                            .font(.system(size: w >= 115 && h >= 54 ? 12 : 10.5, weight: .semibold))
                             .foregroundStyle(.primary)
                             .lineLimit(1)
-                        Spacer(minLength: 0)
-                        if tile.hasCleanableContent && w >= 86 {
-                            Image(systemName: "sparkles")
+
+                        Spacer(minLength: 2)
+
+                        if !tile.node.isSyntheticOther && !tile.node.isProtected && w >= 66 && h >= 30 {
+                            Button {
+                                analyzer.toggleNodeCleanupSelection(tile.node)
+                            } label: {
+                                Image(systemName: isMarkedCleanup ? "checkmark.square.fill" : "square")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(isMarkedCleanup ? Color.accentColor : Color.secondary.opacity(isInteractiveFocus ? 0.9 : 0.45))
+                            }
+                            .buttonStyle(.plain)
+                            .help(isMarkedCleanup ? "Bỏ chọn khỏi danh sách dọn" : "Tích chọn để dọn dẹp")
+                        } else if tile.node.isProtected && !tile.node.isSyntheticOther && isInteractiveFocus && w >= 80 {
+                            Image(systemName: "lock")
                                 .font(.system(size: 9.5))
-                                .foregroundStyle(Color.orange.opacity(0.9))
+                                .foregroundStyle(.tertiary)
+                                .help("Thư mục gốc được bảo vệ — nhấp đúp để mở và dọn các mục con bên trong")
                         }
                     }
 
+                    // 2. Size + Percentage + Cleanable Subtotal Badge
                     if h >= 44 {
-                        Text(w >= 115
-                             ? "\(ByteFormatter.string(tile.node.sizeBytes)) · \(pctString)"
-                             : ByteFormatter.string(tile.node.sizeBytes))
-                            .font(.system(size: 10).monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                        HStack(spacing: 5) {
+                            Text(w >= 112
+                                 ? "\(ByteFormatter.string(tile.node.sizeBytes)) · \(pctString)"
+                                 : ByteFormatter.string(tile.node.sizeBytes))
+                                .font(.system(size: 10.5).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+
+                            if tile.cleanableBytesInside > 0 && w >= 175 {
+                                HStack(spacing: 2.5) {
+                                    Image(systemName: "sparkles")
+                                        .font(.system(size: 8.5))
+                                    Text("Nên dọn \(ByteFormatter.string(tile.cleanableBytesInside))")
+                                        .font(.system(size: 9.5, weight: .medium).monospacedDigit())
+                                }
+                                .foregroundStyle(Color.orange)
+                                .padding(.horizontal, 4.5)
+                                .padding(.vertical, 1)
+                                .background(Color(nsColor: .windowBackgroundColor).opacity(0.75), in: RoundedRectangle(cornerRadius: 3.5))
+                                .lineLimit(1)
+                            }
+                        }
+                    }
+
+                    // 3. Direct Clickable Subfolder Preview Chips inside Roomy Tiles
+                    if showNestedChildPills {
+                        let maxPills = h >= 185 ? 4 : (h >= 155 ? 3 : 2)
+                        let previewChildren = Array(tile.node.children.filter { !$0.isSyntheticOther }.prefix(maxPills))
+                        if !previewChildren.isEmpty {
+                            VStack(alignment: .leading, spacing: 3) {
+                                ForEach(previewChildren) { sub in
+                                    Button {
+                                        if sub.canDrillDown {
+                                            analyzer.drillIntoGrandchild(sub, via: tile.node)
+                                        } else {
+                                            analyzer.drillDown(into: tile.node)
+                                        }
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: sub.isDirectory ? "folder" : "doc")
+                                                .font(.system(size: 9))
+                                                .foregroundStyle(.secondary)
+                                            Text(sub.name)
+                                                .font(.system(size: 10))
+                                                .foregroundStyle(.primary)
+                                                .lineLimit(1)
+                                            Spacer(minLength: 4)
+                                            Text(ByteFormatter.string(sub.sizeBytes))
+                                                .font(.system(size: 9.5).monospacedDigit())
+                                                .foregroundStyle(.secondary)
+                                            if sub.canDrillDown {
+                                                Image(systemName: "chevron.right")
+                                                    .font(.system(size: 8, weight: .semibold))
+                                                    .foregroundStyle(.tertiary)
+                                            }
+                                        }
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2.5)
+                                        .background(
+                                            Color(nsColor: .windowBackgroundColor).opacity(0.62),
+                                            in: RoundedRectangle(cornerRadius: 4)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Nhảy thẳng vào \(sub.displayPath)")
+                                }
+                            }
+                            .padding(.top, 2)
+                        }
+                    }
+
+                    Spacer(minLength: 0)
+
+                    // 4. Inline Quick-Action Controls on Hover / Selection
+                    if showInlineActionBar {
+                        HStack(spacing: 4) {
+                            if tile.node.isSyntheticOther {
+                                inlineTileActionButton(title: "Bung thêm", symbol: "plus.magnifyingglass") {
+                                    analyzer.expandMoreTilesOnMap()
+                                }
+                            } else {
+                                if tile.node.canDrillDown {
+                                    inlineTileActionButton(title: "Mở", symbol: "arrow.turn.down.right") {
+                                        analyzer.drillDown(into: tile.node)
+                                    }
+                                }
+
+                                if tile.cleanableBytesInside > 0 && w >= 195 {
+                                    inlineTileActionButton(title: "Chọn mục dọn", symbol: "sparkles") {
+                                        let count = analyzer.selectCleanableInside(tile.node)
+                                        if count > 0 {
+                                            viewModel.showToast(
+                                                title: "Đã chọn \(count) mục nên dọn trong \(tile.node.name)",
+                                                subtitle: "Nhấn nút ở thanh dưới cùng để chuyển vào Thùng rác."
+                                            )
+                                        }
+                                    }
+                                }
+
+                                if tile.node.isAppBundle && w >= 165 {
+                                    inlineTileActionButton(title: "Gỡ .app", symbol: "trash.slash") {
+                                        viewModel.handleDroppedURLs([URL(fileURLWithPath: tile.node.path)])
+                                    }
+                                } else if !tile.node.isProtected && w >= 135 {
+                                    inlineTileActionButton(title: "Xóa", symbol: "trash") {
+                                        analyzer.requestDirectTrash(for: tile.node)
+                                    }
+                                }
+
+                                if w >= 175 {
+                                    inlineTileActionButton(title: nil, symbol: "folder") {
+                                        viewModel.revealInFinder(tile.node.path)
+                                    }
+                                }
+                            }
+                            Spacer(minLength: 0)
+                        }
                     }
                 }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 5)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 6)
             }
         }
-        .frame(width: w, height: h)
-        .position(x: tile.rect.midX, y: tile.rect.midY)
+        .frame(width: w, height: h, alignment: .topLeading)
+        .clipped()
         .contentShape(Rectangle())
-        .help("\(tile.node.name) — \(ByteFormatter.string(tile.node.sizeBytes)) (\(pctString))\(tile.node.canDrillDown ? " · Nhấp đúp để mở thư mục con" : "")")
+        .onHover { hovering in
+            if hovering {
+                analyzer.hoveredNodeID = tile.id
+            } else if analyzer.hoveredNodeID == tile.id {
+                analyzer.hoveredNodeID = nil
+            }
+        }
         .onTapGesture(count: 2) {
-            analyzer.selectNodeOnMap(tile.node)
-            if tile.node.canDrillDown {
+            if tile.node.isSyntheticOther {
+                analyzer.expandMoreTilesOnMap()
+            } else if tile.node.canDrillDown {
                 analyzer.drillDown(into: tile.node)
             }
         }
         .onTapGesture {
             analyzer.selectNodeOnMap(tile.node)
+        }
+        .contextMenu {
+            tileContextMenu(for: tile)
+        }
+        .help("\(tile.node.name) — \(ByteFormatter.string(tile.node.sizeBytes)) (\(pctString))\(tile.node.canDrillDown ? " · Nhấp đúp để đi vào bên trong · Chuột phải để thao tác" : "")")
+        .offset(x: insetRect.minX, y: insetRect.minY)
+    }
+
+    private func inlineTileActionButton(title: String?, symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: symbol)
+                    .font(.system(size: 9.5, weight: .medium))
+                if let title {
+                    Text(title)
+                        .font(.system(size: 10, weight: .medium))
+                        .lineLimit(1)
+                }
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4))
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color(nsColor: .separatorColor), lineWidth: 0.75)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func tileContextMenu(for tile: TreemapTile) -> some View {
+        if tile.node.isSyntheticOther {
+            Button {
+                analyzer.expandMoreTilesOnMap()
+            } label: {
+                Label("Bung thêm các mục nhỏ lên sơ đồ", systemImage: "plus.magnifyingglass")
+            }
+        } else {
+            if tile.node.canDrillDown {
+                Button {
+                    analyzer.drillDown(into: tile.node)
+                } label: {
+                    Label("Mở bên trong '\(tile.node.name)'", systemImage: "arrow.turn.down.right")
+                }
+            }
+
+            if analyzer.canNavigateUp {
+                Button {
+                    analyzer.navigateUp()
+                } label: {
+                    Label("Quay lại thư mục cha", systemImage: "arrow.uturn.left")
+                }
+            }
+
+            Divider()
+
+            if tile.cleanableBytesInside > 0 {
+                Button {
+                    let count = analyzer.selectCleanableInside(tile.node)
+                    if count > 0 {
+                        viewModel.showToast(
+                            title: "Đã chọn \(count) mục đề xuất dọn trong \(tile.node.name)",
+                            subtitle: "Tổng gợi ý dọn: \(ByteFormatter.string(tile.cleanableBytesInside))"
+                        )
+                    }
+                } label: {
+                    Label("Chọn tất cả mục đề xuất dọn bên trong (\(ByteFormatter.string(tile.cleanableBytesInside)))", systemImage: "sparkles")
+                }
+            }
+
+            if tile.node.isAppBundle {
+                Button {
+                    viewModel.handleDroppedURLs([URL(fileURLWithPath: tile.node.path)])
+                } label: {
+                    Label("Quét & Gỡ triệt để ứng dụng (.app)...", systemImage: "trash.slash")
+                }
+            }
+
+            if !tile.node.isProtected {
+                let checked = analyzer.isPathSelectedForCleanup(tile.node.path)
+                Button {
+                    analyzer.toggleNodeCleanupSelection(tile.node)
+                } label: {
+                    Label(
+                        checked ? "Bỏ chọn khỏi danh sách dọn" : "Tích chọn vào danh sách dọn (\(ByteFormatter.string(tile.node.sizeBytes)))",
+                        systemImage: checked ? "minus.circle" : "checkmark.circle"
+                    )
+                }
+
+                Button(role: .destructive) {
+                    analyzer.requestDirectTrash(for: tile.node)
+                } label: {
+                    Label(
+                        viewModel.removalMode == .moveToTrash
+                            ? "Chuyển ngay '\(tile.node.name)' vào Thùng rác..."
+                            : "Xóa vĩnh viễn '\(tile.node.name)'...",
+                        systemImage: "trash"
+                    )
+                }
+            }
+
+            Divider()
+
+            Button {
+                viewModel.revealInFinder(tile.node.path)
+            } label: {
+                Label("Hiện trong Finder", systemImage: "folder")
+            }
+
+            Button {
+                analyzer.copyPathToClipboard(tile.node.path)
+            } label: {
+                Label("Sao chép đường dẫn", systemImage: "doc.on.doc")
+            }
         }
     }
 

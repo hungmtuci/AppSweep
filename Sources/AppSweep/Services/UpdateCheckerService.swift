@@ -67,7 +67,7 @@ final class UpdateCheckerService: ObservableObject {
     }
 
     var currentVersion: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.4.0"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.4.1"
     }
 
     private var lastSilentCheckTime: CFAbsoluteTime = 0

@@ -21,6 +21,8 @@ final class DiskAnalyzerViewModel: ObservableObject {
     @Published private(set) var rootNode: DiskSpaceNode? = nil
     @Published private(set) var breadcrumbNodes: [DiskSpaceNode] = []
     @Published var highlightedNodeID: String? = nil
+    @Published var hoveredNodeID: String? = nil
+    @Published var maxVisibleTiles: Int = 24
 
     // Explorer Filtering
     @Published var explorerSearchQuery: String = "" {
@@ -49,6 +51,8 @@ final class DiskAnalyzerViewModel: ObservableObject {
     private var manualSelectedNodesByPath: [String: DiskSpaceNode] = [:]
 
     @Published var showCleanupConfirmation: Bool = false
+    @Published var pendingDirectTrashNode: DiskSpaceNode? = nil
+    @Published var showDirectTrashConfirmation: Bool = false
 
     private var activeScanTask: Task<Void, Never>?
     private var drillDownTask: Task<Void, Never>?
@@ -135,6 +139,8 @@ final class DiskAnalyzerViewModel: ObservableObject {
             self.lastElapsedSeconds = snapshot.elapsedSeconds
             self.rootNode = snapshot.rootNode
             self.breadcrumbNodes = [snapshot.rootNode]
+            self.maxVisibleTiles = 24
+            self.hoveredNodeID = nil
             self.highlightedNodeID = snapshot.rootNode.children.first?.id
 
             self.recommendations = snapshot.recommendations
@@ -148,10 +154,51 @@ final class DiskAnalyzerViewModel: ObservableObject {
     // MARK: - Breadcrumb & Drill-Down Navigation
 
     func selectNodeOnMap(_ node: DiskSpaceNode) {
+        if node.isSyntheticOther {
+            expandMoreTilesOnMap()
+            return
+        }
         highlightedNodeID = node.id
     }
 
+    func expandMoreTilesOnMap() {
+        maxVisibleTiles = min(120, maxVisibleTiles + 24)
+    }
+
+    func copyPathToClipboard(_ path: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(path, forType: .string)
+    }
+
+    /// Selects all recommended cleanup items located at or inside `node.path` directly from the chart.
+    @discardableResult
+    func selectCleanableInside(_ node: DiskSpaceNode) -> Int {
+        let prefix = node.path.hasSuffix("/") ? node.path : (node.path + "/")
+        var added = 0
+        for rec in recommendations where rec.path == node.path || rec.path.hasPrefix(prefix) {
+            if selectedCleanupPaths.insert(rec.path).inserted {
+                added += 1
+            }
+        }
+        return added
+    }
+
+    /// Navigates directly into a grandchild subfolder clicked inside a roomy Treemap tile.
+    func drillIntoGrandchild(_ grandchild: DiskSpaceNode, via parent: DiskSpaceNode) {
+        if currentNode?.path != parent.path {
+            breadcrumbNodes.append(parent)
+        }
+        maxVisibleTiles = 24
+        hoveredNodeID = nil
+        drillDown(into: grandchild)
+    }
+
     func drillDown(into node: DiskSpaceNode) {
+        if node.isSyntheticOther {
+            expandMoreTilesOnMap()
+            return
+        }
         guard node.canDrillDown else { return }
 
         // Already inside this node
@@ -159,6 +206,8 @@ final class DiskAnalyzerViewModel: ObservableObject {
 
         if !node.children.isEmpty && !node.hasUnexpandedSubtree {
             breadcrumbNodes.append(node)
+            maxVisibleTiles = 24
+            hoveredNodeID = nil
             explorerSearchQuery = ""
             highlightedNodeID = node.children.first?.id
             rebuildCurrentExplorerChildren()
@@ -182,6 +231,8 @@ final class DiskAnalyzerViewModel: ObservableObject {
                 self.refreshBreadcrumbsFromRoot()
             }
             self.breadcrumbNodes.append(expanded)
+            self.maxVisibleTiles = 24
+            self.hoveredNodeID = nil
             self.explorerSearchQuery = ""
             self.highlightedNodeID = expanded.children.first?.id
             self.rebuildCurrentExplorerChildren()
@@ -191,6 +242,8 @@ final class DiskAnalyzerViewModel: ObservableObject {
     func navigateUp() {
         guard breadcrumbNodes.count > 1 else { return }
         let exited = breadcrumbNodes.removeLast()
+        maxVisibleTiles = 24
+        hoveredNodeID = nil
         explorerSearchQuery = ""
         highlightedNodeID = exited.id
         rebuildCurrentExplorerChildren()
@@ -201,6 +254,8 @@ final class DiskAnalyzerViewModel: ObservableObject {
         if index == breadcrumbNodes.count - 1 { return }
         let nextChild = breadcrumbNodes[index + 1]
         breadcrumbNodes = Array(breadcrumbNodes.prefix(index + 1))
+        maxVisibleTiles = 24
+        hoveredNodeID = nil
         explorerSearchQuery = ""
         highlightedNodeID = nextChild.id
         rebuildCurrentExplorerChildren()
@@ -429,6 +484,71 @@ final class DiskAnalyzerViewModel: ObservableObject {
 
     var selectedCleanupRequiresAdmin: Bool {
         resolvedSelectedCleanupItems.contains(where: \.requiresAdmin)
+    }
+
+    func requestDirectTrash(for node: DiskSpaceNode) {
+        guard !node.isProtected && !node.isSyntheticOther else { return }
+        pendingDirectTrashNode = node
+        showDirectTrashConfirmation = true
+    }
+
+    func executeDirectTrash(mainViewModel: MainViewModel) {
+        guard let node = pendingDirectTrashNode, !node.isProtected, !node.isSyntheticOther else { return }
+        pendingDirectTrashNode = nil
+
+        let singleItem = suggestionByPath[node.path] ?? DiskCleanupSuggestion(
+            id: node.path,
+            path: node.path,
+            title: node.name,
+            sizeBytes: node.sizeBytes,
+            safety: .reviewRecommended,
+            ruleKind: node.isDirectory ? .developerBuild : .largeFiles,
+            reason: "Xóa trực tiếp từ sơ đồ dung lượng thư mục",
+            lastModified: node.modifiedDate,
+            isDirectory: node.isDirectory,
+            requiresAdmin: node.requiresAdmin
+        )
+
+        let modeSnapshot = mainViewModel.removalMode
+        let backupSnapshot = mainViewModel.createZipBackup
+        mainViewModel.isExecutingAction = true
+
+        Task {
+            do {
+                let record = try await Task.detached(priority: .userInitiated) {
+                    try UninstallEngine.cleanDiskAnalysisItems(
+                        items: [singleItem],
+                        mode: modeSnapshot,
+                        createZipBackup: backupSnapshot
+                    )
+                }.value
+
+                mainViewModel.isExecutingAction = false
+                mainViewModel.historyRecords = UninstallEngine.loadHistory()
+
+                let removedPaths = Set(record.entries.map(\.originalPath))
+                self.applySurgicalTreeRemoval(removedPaths: removedPaths)
+                if let rootPath = self.rootNode?.path {
+                    self.volumeMetrics = DiskSpaceAnalyzerService.queryVolumeMetrics(for: rootPath)
+                }
+
+                mainViewModel.showToast(
+                    title: "Đã dọn '\(node.name)' (\(ByteFormatter.string(record.totalBytesFreed)))",
+                    subtitle: modeSnapshot == .moveToTrash
+                        ? "Đã chuyển vào Thùng rác — có thể Hoàn tác 1 chạm."
+                        : "Đã xóa vĩnh viễn khỏi ổ đĩa.",
+                    isError: !record.failedPaths.isEmpty,
+                    restorableRecordID: record.canRestore ? record.id : nil
+                )
+            } catch {
+                mainViewModel.isExecutingAction = false
+                mainViewModel.showToast(
+                    title: "Không thể xóa '\(node.name)'",
+                    subtitle: error.localizedDescription,
+                    isError: true
+                )
+            }
+        }
     }
 
     // MARK: - Cleanup Execution & Instant Tree Surgical Update

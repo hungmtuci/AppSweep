@@ -297,6 +297,7 @@ struct TreemapTile: Identifiable, Equatable {
     let fractionOfParent: Double
     let rankIndex: Int
     let hasCleanableContent: Bool
+    let cleanableBytesInside: Int64
 }
 
 enum SquarifiedTreemapLayout {
@@ -306,14 +307,15 @@ enum SquarifiedTreemapLayout {
         let fraction: Double
         let rankIndex: Int
         let hasCleanableContent: Bool
+        let cleanableBytesInside: Int64
     }
 
     static func compute(
         children: [DiskSpaceNode],
         in bounds: CGRect,
         parentPath: String,
-        cleanablePathPrefixes: [String],
-        maxVisibleTiles: Int = 22
+        recommendations: [DiskCleanupSuggestion],
+        maxVisibleTiles: Int = 24
     ) -> [TreemapTile] {
         guard bounds.width > 8, bounds.height > 8 else { return [] }
 
@@ -326,15 +328,16 @@ enum SquarifiedTreemapLayout {
         // Group tiny tail items into a single synthetic tile so every block remains legible
         var preparedNodes: [DiskSpaceNode] = []
         var tailBytes: Int64 = 0
-        var tailItemCount: Int = 0
+        var tailDirectCount: Int = 0
 
         for (idx, child) in positive.enumerated() {
             let share = Double(child.sizeBytes) / Double(totalBytes)
-            if idx < maxVisibleTiles && (idx < 6 || share >= 0.0045) {
+            let minShareThreshold = maxVisibleTiles > 24 ? 0.0012 : 0.0040
+            if idx < maxVisibleTiles && (idx < 8 || share >= minShareThreshold) {
                 preparedNodes.append(child)
             } else {
                 tailBytes += child.sizeBytes
-                tailItemCount += max(1, child.itemCount)
+                tailDirectCount += 1
             }
         }
 
@@ -345,14 +348,14 @@ enum SquarifiedTreemapLayout {
                 preparedNodes.append(
                     DiskSpaceNode(
                         id: "__treemap_other__:\(parentPath)",
-                        path: "Gồm các tệp và thư mục nhỏ còn lại trong \(PathFormatter.prettyPath(parentPath))",
-                        name: "Mục nhỏ khác",
+                        path: "Nhấp để bung thêm \(tailDirectCount) mục nhỏ đang gộp trên sơ đồ",
+                        name: "Mục nhỏ khác (\(tailDirectCount))",
                         sizeBytes: tailBytes,
                         isDirectory: false,
                         isPackageBundle: false,
                         isSyntheticOther: true,
                         hasUnexpandedSubtree: false,
-                        itemCount: tailItemCount,
+                        itemCount: tailDirectCount,
                         modifiedDate: nil,
                         requiresAdmin: false,
                         isProtected: true,
@@ -369,13 +372,14 @@ enum SquarifiedTreemapLayout {
         let items: [WeightedItem] = preparedNodes.enumerated().map { idx, node in
             let frac = Double(node.sizeBytes) / preparedSum
             let area = max(0.0001, frac * canvasArea)
-            let isCleanable = !node.isSyntheticOther && pathOverlapsCleanable(node.path, cleanablePaths: cleanablePathPrefixes)
+            let cleanBytes = node.isSyntheticOther ? 0 : cleanableBytes(under: node.path, in: recommendations)
             return WeightedItem(
                 node: node,
                 area: area,
                 fraction: Double(node.sizeBytes) / Double(totalBytes),
                 rankIndex: idx,
-                hasCleanableContent: isCleanable
+                hasCleanableContent: cleanBytes > 0,
+                cleanableBytesInside: cleanBytes
             )
         }
 
@@ -416,15 +420,16 @@ enum SquarifiedTreemapLayout {
         return output
     }
 
-    private static func pathOverlapsCleanable(_ nodePath: String, cleanablePaths: [String]) -> Bool {
-        guard !cleanablePaths.isEmpty else { return false }
+    private static func cleanableBytes(under nodePath: String, in recommendations: [DiskCleanupSuggestion]) -> Int64 {
+        guard !recommendations.isEmpty else { return 0 }
         let prefix = nodePath.hasSuffix("/") ? nodePath : (nodePath + "/")
-        for cleanPath in cleanablePaths {
-            if cleanPath == nodePath || cleanPath.hasPrefix(prefix) {
-                return true
+        var sum: Int64 = 0
+        for rec in recommendations {
+            if rec.path == nodePath || rec.path.hasPrefix(prefix) {
+                sum += rec.sizeBytes
             }
         }
-        return false
+        return sum
     }
 
     private static func worstAspectRatio(row: [WeightedItem], sideLength: Double) -> Double {
@@ -470,7 +475,8 @@ enum SquarifiedTreemapLayout {
                     rect: tileRect,
                     fractionOfParent: item.fraction,
                     rankIndex: item.rankIndex,
-                    hasCleanableContent: item.hasCleanableContent
+                    hasCleanableContent: item.hasCleanableContent,
+                    cleanableBytesInside: item.cleanableBytesInside
                 ))
                 cursorY += itemHeight
             }
@@ -496,7 +502,8 @@ enum SquarifiedTreemapLayout {
                     rect: tileRect,
                     fractionOfParent: item.fraction,
                     rankIndex: item.rankIndex,
-                    hasCleanableContent: item.hasCleanableContent
+                    hasCleanableContent: item.hasCleanableContent,
+                    cleanableBytesInside: item.cleanableBytesInside
                 ))
                 cursorX += itemWidth
             }
