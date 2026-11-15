@@ -928,13 +928,16 @@ struct DiskSpaceAnalyzerView: View {
     // MARK: - Right Folder Breakdown Pane
 
     private func folderExplorerListPane(current: DiskSpaceNode) -> some View {
-        VStack(spacing: 0) {
+        let folderSlices = analyzer.ruleBreakdown(forDirectory: current.path)
+        let folderCleanSummary = analyzer.cleanableSummary(under: current.path)
+
+        return VStack(spacing: 0) {
             VStack(spacing: 8) {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
-                    TextField("Lọc thư mục / tệp trong cấp này...", text: $analyzer.explorerSearchQuery)
+                    TextField("Lọc thư mục / tệp trong '\(current.name)'...", text: $analyzer.explorerSearchQuery)
                         .textFieldStyle(.plain)
                         .font(.system(size: 12))
                     if !analyzer.explorerSearchQuery.isEmpty {
@@ -956,36 +959,78 @@ struct DiskSpaceAnalyzerView: View {
                         .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
                 )
 
-                // Quick Advisor Callout Banner
-                if analyzer.totalRecommendedBytes > 0 {
-                    Button {
-                        analyzer.activeMode = .recommendations
-                    } label: {
-                        HStack(spacing: 7) {
+                // Per-Folder Contextual Cleanup Options ("Tuỳ chọn dọn trong thư mục đang mở")
+                if folderCleanSummary.bytes > 0 {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 6) {
                             Image(systemName: "sparkles")
-                                .font(.system(size: 11.5))
+                                .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(Color.orange)
-                            Text("Đề xuất dọn \(ByteFormatter.string(analyzer.totalRecommendedBytes)) (\(analyzer.recommendations.count) mục)")
-                                .font(.system(size: 11.5, weight: .medium))
+                            Text("Tuỳ chọn dọn trong '\(current.name)': \(ByteFormatter.string(folderCleanSummary.bytes))")
+                                .font(.system(size: 11.5, weight: .semibold))
                                 .foregroundStyle(.primary)
                                 .lineLimit(1)
-                            Spacer()
-                            Text("Xem chi tiết")
-                                .font(.system(size: 11))
-                                .foregroundStyle(Color.accentColor)
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 9.5, weight: .semibold))
+                            Spacer(minLength: 4)
+                            let allChosen = folderCleanSummary.selectedCount == folderCleanSummary.count && folderCleanSummary.count > 0
+                            Button(allChosen ? "Bỏ chọn (\(folderCleanSummary.count))" : "Chọn tất cả (\(folderCleanSummary.count))") {
+                                analyzer.toggleAllCleanable(under: current.path)
+                            }
+                            .font(.system(size: 10.5, weight: .medium))
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Color.accentColor)
+
+                            Text("·")
                                 .foregroundStyle(.tertiary)
+
+                            Button("Xem giải thích") {
+                                analyzer.openRecommendationsForFolder(current.path)
+                            }
+                            .font(.system(size: 10.5, weight: .medium))
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
                         }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 6)
-                        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color.orange.opacity(0.28), lineWidth: 0.8)
-                        )
+
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 5) {
+                                ForEach(folderSlices) { slice in
+                                    Button {
+                                        analyzer.toggleRuleSlice(slice.kind, inDirectory: current.path)
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: slice.isAllSelected ? "checkmark.circle.fill" : (slice.isPartiallySelected ? "minus.circle.fill" : "circle"))
+                                                .font(.system(size: 10))
+                                                .foregroundStyle(slice.isAllSelected || slice.isPartiallySelected ? Color.accentColor : .secondary)
+                                            Text("\(slice.kind.shortBadge) (\(slice.itemCount))")
+                                                .font(.system(size: 10.5, weight: .medium))
+                                                .foregroundStyle(.primary)
+                                            Text(ByteFormatter.string(slice.totalBytes))
+                                                .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 3.5)
+                                        .background(
+                                            (slice.isAllSelected ? Color.accentColor.opacity(0.14) : Color(nsColor: .controlBackgroundColor)),
+                                            in: RoundedRectangle(cornerRadius: 5)
+                                        )
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 5)
+                                                .stroke(slice.isAllSelected ? Color.accentColor.opacity(0.45) : Color(nsColor: .separatorColor), lineWidth: 0.8)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("\(slice.kind.title): \(slice.kind.plainExplanation)")
+                                }
+                            }
+                        }
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 7)
+                    .background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 7))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7)
+                            .stroke(Color.orange.opacity(0.28), lineWidth: 0.8)
+                    )
                 }
             }
             .padding(.horizontal, 10)
@@ -1010,7 +1055,9 @@ struct DiskSpaceAnalyzerView: View {
         let isHighlighted = (analyzer.highlightedNodeID == item.id)
         let isChecked = !item.isSyntheticOther && analyzer.isPathSelectedForCleanup(item.path)
         let directSuggestion = item.isSyntheticOther ? nil : analyzer.suggestion(forPath: item.path)
-        let hasNestedCleanable = directSuggestion == nil && analyzer.hasCleanableDescendant(for: item)
+        let nestedCleanSummary = (directSuggestion == nil && item.isDirectory && !item.isPackageBundle && !item.isSyntheticOther)
+            ? analyzer.cleanableSummary(under: item.path)
+            : (bytes: Int64(0), count: 0, selectedCount: 0)
         let ratio = min(1.0, max(0.015, Double(item.sizeBytes) / Double(parentBytes)))
 
         return HStack(spacing: 8) {
@@ -1032,6 +1079,7 @@ struct DiskSpaceAnalyzerView: View {
                 .labelsHidden()
                 .controlSize(.small)
                 .frame(width: 16)
+                .help(directSuggestion != nil ? directSuggestion!.impactIfDeleted : "Chọn toàn bộ '\(item.name)' để dọn")
             }
 
             if item.isSyntheticOther {
@@ -1053,18 +1101,37 @@ struct DiskSpaceAnalyzerView: View {
                         .foregroundStyle(.primary)
                         .lineLimit(1)
 
-                    if directSuggestion != nil {
-                        Text("Nên dọn")
+                    if let sug = directSuggestion {
+                        Text(sug.ruleKind.shortBadge)
                             .font(.system(size: 9.5, weight: .medium))
                             .foregroundStyle(Color.orange)
                             .padding(.horizontal, 4.5)
-                            .padding(.vertical, 0.5)
+                            .padding(.vertical, 1)
                             .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 3))
-                    } else if hasNestedCleanable {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(Color.orange.opacity(0.85))
-                            .help("Bên trong thư mục này có mục đề xuất dọn dẹp")
+                            .help("\(sug.reason) — \(sug.impactIfDeleted)")
+                    } else if nestedCleanSummary.bytes > 0 {
+                        let allNestedSelected = nestedCleanSummary.selectedCount == nestedCleanSummary.count
+                        Button {
+                            analyzer.toggleAllCleanable(under: item.path)
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: allNestedSelected ? "checkmark.circle.fill" : "sparkles")
+                                    .font(.system(size: 9))
+                                Text(allNestedSelected
+                                     ? "Đã chọn \(ByteFormatter.string(nestedCleanSummary.bytes)) thừa"
+                                     : "Dọn \(ByteFormatter.string(nestedCleanSummary.bytes)) thừa")
+                                    .font(.system(size: 9.5, weight: .medium))
+                            }
+                            .foregroundStyle(allNestedSelected ? Color.accentColor : Color.orange)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(
+                                (allNestedSelected ? Color.accentColor.opacity(0.13) : Color.orange.opacity(0.11)),
+                                in: RoundedRectangle(cornerRadius: 3.5)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .help("Chỉ chọn \(nestedCleanSummary.count) mục nháp / bản .app thừa bên trong '\(item.name)' (giữ nguyên mã nguồn & tài liệu)")
                     }
 
                     Spacer(minLength: 4)
@@ -1132,12 +1199,16 @@ struct DiskSpaceAnalyzerView: View {
         }
     }
 
-    // MARK: - 5. Mode B: Smart Cleanup Recommendations View
+    // MARK: - 5. Mode B: Smart Cleanup Recommendations View (Plain-Language + Per-Folder Options)
 
     private var recommendationsAdvisorView: some View {
         VStack(spacing: 0) {
             recommendationsSummaryBanner
             Divider()
+            if !analyzer.folderScopeOptions.isEmpty {
+                recommendationsFolderScopeBar
+                Divider()
+            }
             recommendationsFilterToolbar
             Divider()
 
@@ -1147,20 +1218,34 @@ struct DiskSpaceAnalyzerView: View {
                     Image(systemName: "checkmark.circle")
                         .font(.system(size: 34, weight: .ultraLight))
                         .foregroundStyle(.tertiary)
-                    Text("Không phát hiện mục cần dọn trong bộ lọc hiện tại")
+                    Text("Không có mục dư thừa nào trong bộ lọc đang chọn")
                         .font(.headline)
                         .foregroundStyle(.secondary)
-                    Text("Ổ đĩa hoặc phạm vi thư mục đang chọn đã khá gọn gàng, hoặc bạn có thể chuyển sang quét toàn bộ Thư mục cá nhân (~).")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 420)
+                    if analyzer.selectedFolderFilterPath != nil || analyzer.recommendationSafetyFilter != .all {
+                        Button("Hiển thị lại tất cả thư mục & đề xuất") {
+                            analyzer.selectedFolderFilterPath = nil
+                            analyzer.recommendationSafetyFilter = .all
+                            analyzer.recommendationSearchQuery = ""
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    } else {
+                        Text("Ổ đĩa hoặc phạm vi thư mục đang chọn đã gọn gàng, hoặc bạn có thể chuyển sang quét toàn bộ Thư mục cá nhân (~).")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 420)
+                    }
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
+                        if let selectedFolder = analyzer.selectedFolderFilterPath {
+                            perFolderDetailedOptionsCard(folderPath: selectedFolder)
+                        }
+
                         ForEach(analyzer.groupedRecommendations, id: \.kind) { group in
                             recommendationGroupSection(
                                 kind: group.kind,
@@ -1177,39 +1262,41 @@ struct DiskSpaceAnalyzerView: View {
     }
 
     private var recommendationsSummaryBanner: some View {
-        HStack(spacing: 24) {
-            metricBlock(
-                title: "Tổng dung lượng đề xuất",
-                value: ByteFormatter.string(analyzer.totalRecommendedBytes),
-                note: "\(analyzer.recommendations.count) thư mục & tệp"
-            )
+        HStack(spacing: 12) {
+            advisorQuickCard(
+                badge: "KHUYÊN DÙNG CHO MỌI NGƯỜI",
+                title: "1. Dọn tự động & An toàn 100%",
+                bytes: analyzer.safeRecommendedBytes,
+                description: "Chỉ chọn bộ nhớ tạm, file nháp (.build, dist) và bản .app bị trùng. Không mất tài liệu hay ứng dụng chính.",
+                buttonTitle: "Chọn mục an toàn",
+                isProminent: true,
+                isDisabled: analyzer.safeRecommendedBytes == 0
+            ) {
+                analyzer.selectSafeRecommendations()
+            }
 
-            Divider()
-                .frame(height: 32)
+            advisorQuickCard(
+                badge: "GIẢI PHÓNG FILE .APP & BỘ CÀI",
+                title: "2. Bản .app & Bộ cài dư thừa",
+                bytes: analyzer.appsAndInstallersBytes,
+                description: "Các file .app tạo ra khi build (App 2.app, App 3.app...) ngoài Applications và bộ cài .dmg / .zip cũ.",
+                buttonTitle: "Chọn .app & bộ cài",
+                isProminent: false,
+                isDisabled: analyzer.appsAndInstallersBytes == 0
+            ) {
+                analyzer.selectAppsAndInstallersRecommendations()
+            }
 
-            metricBlock(
-                title: "An toàn cao (Tự tạo lại)",
-                value: ByteFormatter.string(analyzer.safeRecommendedBytes),
-                note: "Cache, Logs, Xcode DerivedData, pip/npm..."
-            )
-
-            Divider()
-                .frame(height: 32)
-
-            metricBlock(
-                title: "Cần xem trước",
-                value: ByteFormatter.string(analyzer.reviewRecommendedBytes),
-                note: "Bộ cài cũ (.dmg/.pkg), node_modules, tệp ≥500MB"
-            )
-
-            Spacer()
-
-            if analyzer.safeRecommendedBytes > 0 {
-                Button("Chọn nhanh mục An toàn cao (\(ByteFormatter.string(analyzer.safeRecommendedBytes)))") {
-                    analyzer.selectSafeRecommendations()
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+            advisorQuickCard(
+                badge: "DÀNH CHO NGƯỜI MUỐN DỌN SÂU",
+                title: "3. Mục lớn cần xem qua",
+                bytes: analyzer.reviewRecommendedBytes,
+                description: "Các tệp lẻ trên 500 MB, thư viện tải về hoặc máy ảo. Hãy nhìn qua tên tệp trước khi tích chọn.",
+                buttonTitle: "Lọc xem danh sách",
+                isProminent: false,
+                isDisabled: analyzer.reviewRecommendedBytes == 0
+            ) {
+                analyzer.recommendationSafetyFilter = .reviewOnly
             }
         }
         .padding(.horizontal, 20)
@@ -1217,18 +1304,225 @@ struct DiskSpaceAnalyzerView: View {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
-    private func metricBlock(title: String, value: String, note: String) -> some View {
-        VStack(alignment: .leading, spacing: 1.5) {
+    private func advisorQuickCard(
+        badge: String,
+        title: String,
+        bytes: Int64,
+        description: String,
+        buttonTitle: String,
+        isProminent: Bool,
+        isDisabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(badge)
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundStyle(isProminent ? Color.accentColor : .secondary)
+                Spacer()
+                Text(ByteFormatter.string(bytes))
+                    .font(.system(size: 13.5, weight: .bold).monospacedDigit())
+                    .foregroundStyle(.primary)
+            }
+
             Text(title)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+
+            Text(description)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            Text(value)
-                .font(.system(size: 15, weight: .semibold).monospacedDigit())
-                .foregroundStyle(.primary)
-            Text(note)
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Spacer()
+                if isProminent {
+                    Button(buttonTitle, action: action)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(isDisabled)
+                } else {
+                    Button(buttonTitle, action: action)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(isDisabled)
+                }
+            }
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isProminent ? Color.accentColor.opacity(0.35) : Color(nsColor: .separatorColor), lineWidth: 1)
+        )
+    }
+
+    private var recommendationsFolderScopeBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 7) {
+                HStack(spacing: 4) {
+                    Image(systemName: "folder.badge.gearshape")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Text("Tuỳ chọn theo thư mục:")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.trailing, 2)
+
+                folderScopePill(
+                    title: "Tất cả thư mục",
+                    bytes: analyzer.totalRecommendedBytes,
+                    count: analyzer.recommendations.count,
+                    isSelected: analyzer.selectedFolderFilterPath == nil
+                ) {
+                    analyzer.selectedFolderFilterPath = nil
+                }
+
+                ForEach(analyzer.folderScopeOptions) { opt in
+                    folderScopePill(
+                        title: opt.displayName,
+                        bytes: opt.reclaimableBytes,
+                        count: opt.itemCount,
+                        isSelected: analyzer.selectedFolderFilterPath == opt.folderPath
+                    ) {
+                        if analyzer.selectedFolderFilterPath == opt.folderPath {
+                            analyzer.selectedFolderFilterPath = nil
+                        } else {
+                            analyzer.selectedFolderFilterPath = opt.folderPath
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+        }
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.6))
+    }
+
+    private func folderScopePill(
+        title: String,
+        bytes: Int64,
+        count: Int,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: isSelected ? "folder.fill" : "folder")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                Text(title)
+                    .font(.system(size: 11.5, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text("(\(count)) · \(ByteFormatter.string(bytes))")
+                    .font(.system(size: 10.5, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4.5)
+            .background(
+                isSelected ? Color.accentColor.opacity(0.14) : Color(nsColor: .controlBackgroundColor),
+                in: RoundedRectangle(cornerRadius: 6)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(isSelected ? Color.accentColor.opacity(0.55) : Color(nsColor: .separatorColor), lineWidth: 0.9)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func perFolderDetailedOptionsCard(folderPath: String) -> some View {
+        let folderName = (folderPath as NSString).lastPathComponent
+        let slices = analyzer.ruleBreakdown(forDirectory: folderPath)
+        let summary = analyzer.cleanableSummary(under: folderPath)
+        let allSelected = summary.selectedCount == summary.count && summary.count > 0
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(nsImage: viewModel.icon(for: folderPath))
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 24, height: 24)
+
+                VStack(alignment: .leading, spacing: 1.5) {
+                    HStack(spacing: 6) {
+                        Text("Tuỳ chọn dọn trong thư mục '\(folderName)'")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("· \(summary.count) mục dư thừa (\(ByteFormatter.string(summary.bytes)))")
+                            .font(.system(size: 12, weight: .medium).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("Bấm vào từng loại bên dưới để bật/tắt mục bạn muốn dọn trong '\(PathFormatter.prettyPath(folderPath))'. Các thư mục mã nguồn & tài liệu gốc luôn được giữ nguyên.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button(allSelected ? "Bỏ chọn thư mục này" : "Chọn hết phần thừa (\(ByteFormatter.string(summary.bytes)))") {
+                    analyzer.toggleAllCleanable(under: folderPath)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+
+                Button {
+                    viewModel.revealInFinder(folderPath)
+                } label: {
+                    Image(systemName: "folder")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Mở thư mục '\(folderName)' trong Finder")
+            }
+
+            if !slices.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(slices) { slice in
+                        Button {
+                            analyzer.toggleRuleSlice(slice.kind, inDirectory: folderPath)
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: slice.isAllSelected ? "checkmark.square.fill" : (slice.isPartiallySelected ? "minus.square.fill" : "square"))
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(slice.isAllSelected || slice.isPartiallySelected ? Color.accentColor : .secondary)
+                                Text(slice.kind.shortBadge)
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .foregroundStyle(.primary)
+                                Text("(\(slice.itemCount)) · \(ByteFormatter.string(slice.totalBytes))")
+                                    .font(.system(size: 11, weight: .medium).monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(
+                                slice.isAllSelected ? Color.accentColor.opacity(0.12) : Color(nsColor: .textBackgroundColor),
+                                in: RoundedRectangle(cornerRadius: 6)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(slice.isAllSelected ? Color.accentColor.opacity(0.45) : Color(nsColor: .separatorColor), lineWidth: 0.8)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Spacer()
+                }
+            }
+        }
+        .padding(12)
+        .background(Color.accentColor.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.accentColor.opacity(0.28), lineWidth: 1)
+        )
     }
 
     private var recommendationsFilterToolbar: some View {
@@ -1237,7 +1531,7 @@ struct DiskSpaceAnalyzerView: View {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
-                TextField("Tìm theo tên thư mục, đường dẫn hoặc loại dữ liệu...", text: $analyzer.recommendationSearchQuery)
+                TextField("Tìm theo tên ứng dụng (.app), thư mục hoặc đường dẫn...", text: $analyzer.recommendationSearchQuery)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
                 if !analyzer.recommendationSearchQuery.isEmpty {
@@ -1253,7 +1547,7 @@ struct DiskSpaceAnalyzerView: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .frame(width: 290)
+            .frame(width: 280)
             .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor), lineWidth: 1))
 
@@ -1265,18 +1559,18 @@ struct DiskSpaceAnalyzerView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .controlSize(.small)
-            .frame(width: 285)
+            .frame(width: 390)
 
             Spacer()
 
-            Button("Chọn tất cả đang lọc") {
+            Button("Chọn tất cả đang hiển thị") {
                 analyzer.selectAllFilteredRecommendations()
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
 
             if analyzer.selectedCleanupCount > 0 {
-                Button("Bỏ chọn") {
+                Button("Bỏ chọn hết") {
                     analyzer.clearCleanupSelection()
                 }
                 .buttonStyle(.bordered)
@@ -1295,35 +1589,45 @@ struct DiskSpaceAnalyzerView: View {
         let allSelected = items.allSatisfy { analyzer.isPathSelectedForCleanup($0.path) }
 
         return VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 7) {
-                Toggle(
-                    "",
-                    isOn: Binding(
-                        get: { allSelected },
-                        set: { newValue in analyzer.setCategorySelection(kind, selected: newValue) }
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 7) {
+                    Toggle(
+                        "",
+                        isOn: Binding(
+                            get: { allSelected },
+                            set: { newValue in analyzer.setCategorySelection(kind, selected: newValue) }
+                        )
                     )
-                )
-                .toggleStyle(.checkbox)
-                .labelsHidden()
-                .controlSize(.small)
+                    .toggleStyle(.checkbox)
+                    .labelsHidden()
+                    .controlSize(.small)
 
-                Image(systemName: kind.symbolName)
-                    .font(.system(size: 12))
+                    Image(systemName: kind.symbolName)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+
+                    Text(kind.title)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(.primary)
+
+                    Text("(\(items.count) mục)")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Button(allSelected ? "Bỏ chọn nhóm này" : "Chọn cả nhóm (\(ByteFormatter.string(subtotalBytes)))") {
+                        analyzer.setCategorySelection(kind, selected: !allSelected)
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+                }
+
+                Text(kind.plainExplanation)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
-
-                Text(kind.title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-
-                Text("(\(items.count))")
-                    .font(.system(size: 11).monospacedDigit())
-                    .foregroundStyle(.tertiary)
-
-                Spacer()
-
-                Text(ByteFormatter.string(subtotalBytes))
-                    .font(.system(size: 11.5, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .padding(.leading, 22)
             }
             .padding(.horizontal, 4)
 
@@ -1362,19 +1666,19 @@ struct DiskSpaceAnalyzerView: View {
             Image(nsImage: viewModel.icon(for: item.path))
                 .resizable()
                 .interpolation(.high)
-                .frame(width: 22, height: 22)
+                .frame(width: 24, height: 24)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 2.5) {
                 HStack(spacing: 6) {
                     Text(item.title)
                         .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(isSelected ? .primary : .secondary)
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
 
                     HStack(spacing: 3) {
                         Image(systemName: item.safety.symbolName)
                             .font(.system(size: 9))
-                        Text(item.safety.title)
+                        Text(item.safety.badgeText)
                             .font(.system(size: 10, weight: .medium))
                     }
                     .foregroundStyle(item.safety == .safeRecreate ? Color.secondary : Color.orange)
@@ -1384,6 +1688,23 @@ struct DiskSpaceAnalyzerView: View {
                         (item.safety == .safeRecreate ? Color.primary.opacity(0.06) : Color.orange.opacity(0.11)),
                         in: RoundedRectangle(cornerRadius: 4)
                     )
+
+                    Button {
+                        analyzer.selectedFolderFilterPath = item.parentFolderPath
+                    } label: {
+                        HStack(spacing: 2.5) {
+                            Image(systemName: "folder")
+                                .font(.system(size: 9))
+                            Text(item.parentFolderName)
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Lọc xem riêng các mục trong thư mục '\(item.parentFolderName)'")
 
                     if let age = item.ageDescription() {
                         Text("· \(age)")
@@ -1399,17 +1720,29 @@ struct DiskSpaceAnalyzerView: View {
                     }
                 }
 
-                Text("\(item.displayPath)  —  \(item.reason)")
+                Text(item.reason)
                     .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .truncationMode(.middle)
+
+                HStack(spacing: 6) {
+                    Text("✓ \(item.impactIfDeleted)")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(item.safety == .safeRecreate ? Color.secondary : Color.orange.opacity(0.9))
+                        .lineLimit(1)
+
+                    Text("· \(item.displayPath)")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
             }
 
             Spacer(minLength: 8)
 
             Text(ByteFormatter.string(item.sizeBytes))
-                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .font(.system(size: 12.5, weight: .semibold).monospacedDigit())
                 .foregroundStyle(.primary)
 
             Button {
@@ -1433,7 +1766,7 @@ struct DiskSpaceAnalyzerView: View {
             .help("Hiện trong Finder")
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 7.5)
+        .padding(.vertical, 8)
         .contentShape(Rectangle())
         .onTapGesture {
             analyzer.toggleSuggestionSelection(item)

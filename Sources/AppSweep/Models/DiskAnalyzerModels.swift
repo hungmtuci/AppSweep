@@ -125,17 +125,24 @@ enum CleanupSafetyLevel: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .safeRecreate: return "An toàn cao"
-        case .reviewRecommended: return "Cần xem trước"
+        case .safeRecreate: return "Xóa an toàn"
+        case .reviewRecommended: return "Nên xem qua"
+        }
+    }
+
+    var badgeText: String {
+        switch self {
+        case .safeRecreate: return "An toàn — Không mất dữ liệu"
+        case .reviewRecommended: return "Kiểm tra nếu bạn còn dùng"
         }
     }
 
     var subtitle: String {
         switch self {
         case .safeRecreate:
-            return "Bộ nhớ đệm, log hoặc dữ liệu tạm — hệ thống & ứng dụng tự tạo lại khi cần"
+            return "Chỉ gồm file nháp, bộ nhớ tạm hoặc bản ứng dụng bị trùng lặp — xóa đi giúp nhẹ máy mà không mất tài liệu hay cài đặt"
         case .reviewRecommended:
-            return "Bộ cài cũ, thư viện build dự án hoặc tệp lớn — nên kiểm tra trước khi xóa"
+            return "Gồm các bộ cài đã tải về, bản ứng dụng trong thư mục làm việc hoặc tệp rất lớn — hãy tích chọn nếu bạn không còn dùng"
         }
     }
 
@@ -150,25 +157,28 @@ enum CleanupSafetyLevel: String, Codable, CaseIterable, Identifiable, Sendable {
 enum CleanupSafetyFilter: String, CaseIterable, Identifiable, Sendable {
     case all = "all"
     case safeOnly = "safeOnly"
+    case appsAndInstallers = "appsAndInstallers"
     case reviewOnly = "reviewOnly"
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .all: return "Tất cả đề xuất"
-        case .safeOnly: return "An toàn cao"
-        case .reviewOnly: return "Cần xem trước"
+        case .all: return "Tất cả gợi ý"
+        case .safeOnly: return "An toàn 100%"
+        case .appsAndInstallers: return "Bản .app & Bộ cài thừa"
+        case .reviewOnly: return "Mục lớn cần xem"
         }
     }
 }
 
 enum CleanupRuleKind: String, Codable, CaseIterable, Identifiable, Sendable {
-    case appCaches = "appCaches"
+    case builtAndDuplicateApps = "builtAndDuplicateApps"
     case developerBuild = "developerBuild"
+    case appCaches = "appCaches"
     case packageCache = "packageCache"
-    case logsAndCrash = "logsAndCrash"
     case oldInstallers = "oldInstallers"
+    case logsAndCrash = "logsAndCrash"
     case iosBackupsAndVMs = "iosBackupsAndVMs"
     case largeFiles = "largeFiles"
 
@@ -176,42 +186,67 @@ enum CleanupRuleKind: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .appCaches:
-            return "Bộ nhớ đệm ứng dụng (Application Caches)"
+        case .builtAndDuplicateApps:
+            return "Ứng dụng (.app) bị nhân bản hoặc tạo ra khi đóng gói"
         case .developerBuild:
-            return "Dữ liệu biên dịch & Dự án lập trình (Xcode / node_modules / Build)"
+            return "File nháp tạo ra khi đóng gói phần mềm (.build, dist, Xcode)"
+        case .appCaches:
+            return "Bộ nhớ tạm của các ứng dụng (Caches)"
         case .packageCache:
-            return "Bộ đệm trình quản lý gói (Homebrew / npm / pip / Cargo)"
-        case .logsAndCrash:
-            return "Nhật ký hệ thống & Báo cáo lỗi (Logs / Crash Reports)"
+            return "Gói cài đặt lưu tạm của công cụ hệ thống"
         case .oldInstallers:
-            return "Bộ cài đặt & Gói nén trong Tải về (.dmg / .pkg / .zip)"
+            return "Bộ cài đặt cũ (.dmg, .pkg, .zip) sau khi đã cài xong"
+        case .logsAndCrash:
+            return "Nhật ký hoạt động & Báo cáo lỗi cũ (Logs)"
         case .iosBackupsAndVMs:
-            return "Sao lưu thiết bị, Simulator & Dữ liệu Container lớn"
+            return "Bản sao lưu điện thoại & Ổ đĩa máy ảo"
         case .largeFiles:
-            return "Tệp đơn lẻ dung lượng rất lớn (≥ 500 MB)"
+            return "Tệp dung lượng rất lớn (≥ 500 MB)"
+        }
+    }
+
+    var plainExplanation: String {
+        switch self {
+        case .builtAndDuplicateApps:
+            return "Các bản sao ứng dụng đánh số (2, 3...) hoặc file .app sinh ra trong thư mục dự án khi bạn đã có bản chính trong Applications."
+        case .developerBuild:
+            return "Thư mục trung gian (.build, dist, DerivedData) tự sinh ra lúc chạy hoặc đóng gói phần mềm — xóa đi vẫn giữ nguyên 100% mã nguồn và tài liệu."
+        case .appCaches:
+            return "Dữ liệu lưu tạm để mở ứng dụng nhanh hơn — ứng dụng sẽ tự tạo lại khi cần, không mất tài khoản hay thiết lập."
+        case .packageCache:
+            return "Các gói thư viện đã tải về trước đây nằm chờ trong bộ nhớ đệm — xóa đi giúp giải phóng ổ đĩa ngay lập tức."
+        case .oldInstallers:
+            return "Các file bộ cài (.dmg, .pkg, .zip) lưu trên máy sau khi bạn đã cài đặt phần mềm xong."
+        case .logsAndCrash:
+            return "Các tệp văn bản ghi lịch sử hoạt động cũ của hệ thống — hoàn toàn vô hại khi dọn sạch."
+        case .iosBackupsAndVMs:
+            return "Bản sao lưu iPhone/iPad cũ hoặc ổ đĩa máy ảo — chỉ xóa khi bạn không còn cần dùng."
+        case .largeFiles:
+            return "Các video hoặc tệp dữ liệu chiếm từ 500 MB trở lên — hãy xem lại trước khi xóa."
         }
     }
 
     var shortBadge: String {
         switch self {
-        case .appCaches: return "Cache ứng dụng"
-        case .developerBuild: return "Build / Dev"
-        case .packageCache: return "Package Cache"
-        case .logsAndCrash: return "Logs"
-        case .oldInstallers: return "Bộ cài cũ"
-        case .iosBackupsAndVMs: return "Backup / VM"
-        case .largeFiles: return "Tệp lớn"
+        case .builtAndDuplicateApps: return "Bản .app thừa"
+        case .developerBuild: return "File nháp (.build / dist)"
+        case .appCaches: return "Bộ nhớ tạm"
+        case .packageCache: return "Gói lưu tạm"
+        case .oldInstallers: return "Bộ cài (.dmg / .zip)"
+        case .logsAndCrash: return "Nhật ký lỗi"
+        case .iosBackupsAndVMs: return "Sao lưu / Máy ảo"
+        case .largeFiles: return "Tệp rất lớn"
         }
     }
 
     var symbolName: String {
         switch self {
-        case .appCaches: return "internaldrive"
+        case .builtAndDuplicateApps: return "app.badge.checkmark"
         case .developerBuild: return "hammer"
+        case .appCaches: return "internaldrive"
         case .packageCache: return "shippingbox"
-        case .logsAndCrash: return "doc.text"
         case .oldInstallers: return "arrow.down.doc"
+        case .logsAndCrash: return "doc.text"
         case .iosBackupsAndVMs: return "externaldrive"
         case .largeFiles: return "doc.badge.ellipsis"
         }
@@ -219,18 +254,21 @@ enum CleanupRuleKind: String, Codable, CaseIterable, Identifiable, Sendable {
 
     var sortOrder: Int {
         switch self {
-        case .appCaches: return 0
-        case .packageCache: return 1
-        case .logsAndCrash: return 2
-        case .developerBuild: return 3
+        case .builtAndDuplicateApps: return 0
+        case .developerBuild: return 1
+        case .appCaches: return 2
+        case .packageCache: return 3
         case .oldInstallers: return 4
-        case .iosBackupsAndVMs: return 5
-        case .largeFiles: return 6
+        case .logsAndCrash: return 5
+        case .iosBackupsAndVMs: return 6
+        case .largeFiles: return 7
         }
     }
 
     var mappedFileCategory: FileCategory {
         switch self {
+        case .builtAndDuplicateApps:
+            return .appBundle
         case .appCaches, .packageCache:
             return .caches
         case .logsAndCrash:
@@ -251,12 +289,53 @@ struct DiskCleanupSuggestion: Identifiable, Equatable, Sendable {
     let safety: CleanupSafetyLevel
     let ruleKind: CleanupRuleKind
     let reason: String
+    let impactIfDeleted: String
     let lastModified: Date?
     let isDirectory: Bool
     let requiresAdmin: Bool
 
+    init(
+        id: String,
+        path: String,
+        title: String,
+        sizeBytes: Int64,
+        safety: CleanupSafetyLevel,
+        ruleKind: CleanupRuleKind,
+        reason: String,
+        impactIfDeleted: String? = nil,
+        lastModified: Date?,
+        isDirectory: Bool,
+        requiresAdmin: Bool
+    ) {
+        self.id = id
+        self.path = path
+        self.title = title
+        self.sizeBytes = sizeBytes
+        self.safety = safety
+        self.ruleKind = ruleKind
+        self.reason = reason
+        self.impactIfDeleted = impactIfDeleted ?? (
+            safety == .safeRecreate
+            ? "Xóa hoàn toàn an toàn — Không làm mất tài liệu, mã nguồn hay ứng dụng chính."
+            : "Nên kiểm tra nhanh — Chỉ giữ lại nếu bạn vẫn đang dùng trực tiếp tệp này."
+        )
+        self.lastModified = lastModified
+        self.isDirectory = isDirectory
+        self.requiresAdmin = requiresAdmin
+    }
+
     var displayPath: String {
         PathFormatter.prettyPath(path)
+    }
+
+    var parentFolderPath: String {
+        (path as NSString).deletingLastPathComponent
+    }
+
+    var parentFolderName: String {
+        let p = parentFolderPath
+        let last = (p as NSString).lastPathComponent
+        return last.isEmpty ? p : last
     }
 
     func ageDescription(now: Date = Date()) -> String? {
@@ -266,6 +345,30 @@ struct DiskCleanupSuggestion: Identifiable, Equatable, Sendable {
         if days < 30 { return "\(days) ngày trước" }
         if days < 365 { return "\(days / 30) tháng trước" }
         return "\(days / 365) năm trước"
+    }
+}
+
+struct FolderCleanupScopeOption: Identifiable, Equatable, Sendable {
+    let id: String
+    let folderPath: String
+    let displayName: String
+    let reclaimableBytes: Int64
+    let itemCount: Int
+}
+
+struct FolderRuleBreakdownSlice: Identifiable, Equatable, Sendable {
+    var id: String { kind.rawValue }
+    let kind: CleanupRuleKind
+    let totalBytes: Int64
+    let itemCount: Int
+    let selectedCount: Int
+
+    var isAllSelected: Bool {
+        itemCount > 0 && selectedCount == itemCount
+    }
+
+    var isPartiallySelected: Bool {
+        selectedCount > 0 && selectedCount < itemCount
     }
 }
 

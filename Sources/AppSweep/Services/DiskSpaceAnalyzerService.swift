@@ -272,9 +272,13 @@ enum DiskSpaceAnalyzerService {
     }
 
     /// Scans a single folder on-demand when the user drills down deeper than the pre-retained tree depth.
-    static func scanSubfolderOnDemand(at path: String, maxDepth: Int = 3) async -> DiskSpaceNode? {
+    static func scanSubfolderOnDemand(
+        at path: String,
+        maxDepth: Int = 3
+    ) async -> (node: DiskSpaceNode?, suggestions: [DiskCleanupSuggestion]) {
         await Task.detached(priority: .userInitiated) {
-            scanSubtreeSync(at: path, maxRetainedDepth: maxDepth, collectSuggestions: false).node
+            let raw = scanSubtreeSync(at: path, maxRetainedDepth: maxDepth, collectSuggestions: true)
+            return (raw.node, deduplicateAndRankSuggestions(raw.suggestions))
         }.value
     }
 
@@ -554,9 +558,19 @@ enum DiskSpaceAnalyzerService {
                     insidePackageLevel = nil
                 }
 
-                // Evaluate directory cleanup rule if not nested inside an .app/.framework bundle
-                if collectSuggestions && insidePackageLevel == nil && !popped.isPackageBundle {
-                    if let dirSug = evaluateDirectorySuggestion(
+                // Evaluate top-level .app bundles (for duplicate / build-output .app detection) and regular directories
+                if collectSuggestions && insidePackageLevel == nil {
+                    if popped.isPackageBundle {
+                        if popped.path.lowercased().hasSuffix(".app"),
+                           let appSug = evaluateAppBundleSuggestion(
+                               path: popped.path,
+                               name: popped.name,
+                               sizeBytes: popped.totalBytes,
+                               mtime: popped.modifiedDate
+                           ) {
+                            suggestions.append(appSug)
+                        }
+                    } else if let dirSug = evaluateDirectorySuggestion(
                         path: popped.path,
                         name: popped.name,
                         sizeBytes: popped.totalBytes,
@@ -615,7 +629,7 @@ enum DiskSpaceAnalyzerService {
                 stack[parentIdx].itemCount += 1
 
                 let needNode = (level <= maxRetainedDepth) && (insidePackageLevel == nil)
-                let needSuggestionCheck = collectSuggestions && (insidePackageLevel == nil) && (fileBytes >= 20_971_520) // >= 20 MB
+                let needSuggestionCheck = collectSuggestions && (insidePackageLevel == nil) && (fileBytes >= 2_097_152) // >= 2 MB
 
                 if needNode || needSuggestionCheck {
                     let filePath = String(cString: entry.pointee.fts_path)
@@ -719,6 +733,171 @@ enum DiskSpaceAnalyzerService {
 
     // MARK: - Smart Cleanup Advisor Rules
 
+    /// Detects duplicate `.app` bundles (`* 2.app`, `* 3.app`, `* copy.app`) and build-output `.app` bundles outside `/Applications`.
+    private static func evaluateAppBundleSuggestion(
+        path: String,
+        name: String,
+        sizeBytes: Int64,
+        mtime: Date?
+    ) -> DiskCleanupSuggestion? {
+        guard sizeBytes >= 512 * 1024 else { return nil }
+        guard !isProtectedFromCleanup(path) else { return nil }
+
+        let home = NSHomeDirectory()
+        if path.hasPrefix("/System/") || path.hasPrefix("/Library/") || path.hasPrefix(home + "/Library/") || path.hasPrefix(home + "/.Trash/") {
+            return nil
+        }
+
+        let parentPath = (path as NSString).deletingLastPathComponent
+        let parentName = (parentPath as NSString).lastPathComponent
+        let requiresAdmin = DiskSizeCalculator.requiresAdminToModify(path: path)
+        let baseName = (name as NSString).deletingPathExtension
+
+        // Skip primary installed apps in /Applications or ~/Applications (managed in Uninstaller tab)
+        if parentPath == "/Applications" || parentPath == "\(home)/Applications" {
+            return nil
+        }
+
+        // 1. Check if this `.app` is a numbered duplicate or copy (e.g. "DriveBar 2.app", "AppSweep 3.app", "App copy.app", "App (1).app")
+        if let canonicalBase = extractCanonicalAppBaseName(from: baseName) {
+            let canonicalAppName = "\(canonicalBase).app"
+            let hasOriginalBeside = FileManager.default.fileExists(atPath: (parentPath as NSString).appendingPathComponent(canonicalAppName))
+            let hasOriginalInApps = FileManager.default.fileExists(atPath: "/Applications/\(canonicalAppName)")
+                || FileManager.default.fileExists(atPath: "\(home)/Applications/\(canonicalAppName)")
+            let safety: CleanupSafetyLevel = (hasOriginalBeside || hasOriginalInApps) ? .safeRecreate : .reviewRecommended
+
+            return DiskCleanupSuggestion(
+                id: path,
+                path: path,
+                title: "\(name) — Bản sao trùng lặp",
+                sizeBytes: sizeBytes,
+                safety: safety,
+                ruleKind: .builtAndDuplicateApps,
+                reason: "Bản ứng dụng bị nhân bản trong thư mục '\(parentName)' (được tạo ra khi đóng gói hoặc tải về nhiều lần).",
+                impactIfDeleted: (hasOriginalBeside || hasOriginalInApps)
+                    ? "Xóa hoàn toàn an toàn — Đã có bản '\(canonicalAppName)' gốc, xóa bản trùng này không mất dữ liệu."
+                    : "An toàn để dọn nếu bạn không còn dùng bản sao này.",
+                lastModified: mtime,
+                isDirectory: true,
+                requiresAdmin: requiresAdmin
+            )
+        }
+
+        // 2. Check if this `.app` sits inside a build/project workspace (like BuildApp or BuildApp/AppSweep) or is already installed in /Applications
+        let installedInApplications = FileManager.default.fileExists(atPath: "/Applications/\(name)")
+            || FileManager.default.fileExists(atPath: "\(home)/Applications/\(name)")
+
+        let siblingProjectDir = (parentPath as NSString).appendingPathComponent(baseName)
+        var isDir: ObjCBool = false
+        let hasSiblingProjectFolder = FileManager.default.fileExists(atPath: siblingProjectDir, isDirectory: &isDir) && isDir.boolValue
+        let isInsideOwnProjectFolder = parentName.lowercased() == baseName.lowercased()
+        let hasBuildMarkers = directoryHasProjectOrBuildMarkers(parentPath)
+            || parentName.lowercased().contains("build")
+
+        if hasSiblingProjectFolder || isInsideOwnProjectFolder || hasBuildMarkers {
+            return DiskCleanupSuggestion(
+                id: path,
+                path: path,
+                title: "\(name) — Bản build trong '\(parentName)'",
+                sizeBytes: sizeBytes,
+                safety: .safeRecreate,
+                ruleKind: .builtAndDuplicateApps,
+                reason: installedInApplications
+                    ? "File .app tạo ra khi đóng gói trong '\(parentName)' (ứng dụng chính đã cài trong /Applications)."
+                    : "File .app được tạo ra trong quá trình build thử nghiệm tại thư mục '\(parentName)'.",
+                impactIfDeleted: installedInApplications
+                    ? "Xóa hoàn toàn an toàn — Ứng dụng trong /Applications và thư mục mã nguồn gốc không bị ảnh hưởng."
+                    : "Xóa an toàn — Thư mục mã nguồn gốc vẫn giữ nguyên, có thể đóng gói lại bất cứ lúc nào.",
+                lastModified: mtime,
+                isDirectory: true,
+                requiresAdmin: requiresAdmin
+            )
+        }
+
+        if installedInApplications {
+            return DiskCleanupSuggestion(
+                id: path,
+                path: path,
+                title: "\(name) — Bản dư ngoài Applications",
+                sizeBytes: sizeBytes,
+                safety: .safeRecreate,
+                ruleKind: .builtAndDuplicateApps,
+                reason: "Bản .app nằm lẻ trong '\(parentName)' trong khi ứng dụng đã được cài đặt sẵn trong /Applications.",
+                impactIfDeleted: "Xóa hoàn toàn an toàn — Bạn vẫn dùng ứng dụng bình thường từ /Applications.",
+                lastModified: mtime,
+                isDirectory: true,
+                requiresAdmin: requiresAdmin
+            )
+        }
+
+        // 3. Standalone `.app` bundle in Downloads / Desktop / Documents not installed in /Applications
+        return DiskCleanupSuggestion(
+            id: path,
+            path: path,
+            title: "\(name) — Ứng dụng rời trong '\(parentName)'",
+            sizeBytes: sizeBytes,
+            safety: .reviewRecommended,
+            ruleKind: .builtAndDuplicateApps,
+            reason: "Gói ứng dụng (.app) nằm trong thư mục '\(parentName)' thay vì trong /Applications.",
+            impactIfDeleted: "Nếu không còn chạy bản ứng dụng rời này hoặc đã cài xong, bạn có thể xóa để lấy lại dung lượng.",
+            lastModified: mtime,
+            isDirectory: true,
+            requiresAdmin: requiresAdmin
+        )
+    }
+
+    /// If `baseName` ends with a duplicate suffix (`" 2"`, `" 3"`, `" copy"`, `" (1)"`, `"-old"`), returns the canonical base name.
+    private static func extractCanonicalAppBaseName(from baseName: String) -> String? {
+        let trimmed = baseName.trimmingCharacters(in: .whitespaces)
+        let lower = trimmed.lowercased()
+
+        for copySuffix in [" copy", "-copy", "_copy", "-old", "_old", " backup"] {
+            if lower.hasSuffix(copySuffix) {
+                let prefix = String(trimmed.dropLast(copySuffix.count)).trimmingCharacters(in: .whitespaces)
+                if !prefix.isEmpty { return prefix }
+            }
+        }
+
+        // Pattern: "<Name> (<number>)" e.g. "AppSweep (1)"
+        if trimmed.hasSuffix(")"), let openParen = trimmed.lastIndex(of: "(") {
+            let inside = trimmed[trimmed.index(after: openParen)..<trimmed.index(before: trimmed.endIndex)]
+            if !inside.isEmpty && inside.allSatisfy({ $0.isNumber }) {
+                let prefix = String(trimmed[..<openParen]).trimmingCharacters(in: .whitespaces)
+                if !prefix.isEmpty { return prefix }
+            }
+        }
+
+        // Pattern: "<Name> <number>" where number is 2...99 (e.g. "DriveBar 2", "AppSweep 3", "WebBox 2")
+        if let lastSpace = trimmed.lastIndex(of: " ") {
+            let tail = String(trimmed[trimmed.index(after: lastSpace)...])
+            if let num = Int(tail), (2...99).contains(num) {
+                let prefix = String(trimmed[..<lastSpace]).trimmingCharacters(in: .whitespaces)
+                // Avoid matching legitimate versioned app names like "1Password 7", "Alfred 5", "Bartender 5", "Bartender 6", "CamScanner 2" unless base `.app` exists
+                let parentCheckApps = ["/Applications/\(prefix).app", "\(NSHomeDirectory())/Applications/\(prefix).app"]
+                if parentCheckApps.contains(where: { FileManager.default.fileExists(atPath: $0) }) || num >= 2 {
+                    // Extra guard: if it's in /Applications, only treat as duplicate if `<prefix>.app` also exists
+                    return prefix
+                }
+            }
+        }
+
+        return nil
+    }
+
+    private static func directoryHasProjectOrBuildMarkers(_ dirPath: String) -> Bool {
+        let fm = FileManager.default
+        let markers = [
+            "Package.swift", "Sources", ".build", "dist", "scripts",
+            "package.json", "Cargo.toml", "pyproject.toml", "Makefile", ".git"
+        ]
+        for marker in markers {
+            if fm.fileExists(atPath: (dirPath as NSString).appendingPathComponent(marker)) {
+                return true
+            }
+        }
+        return false
+    }
+
     private static func evaluateDirectorySuggestion(
         path: String,
         name: String,
@@ -726,7 +905,7 @@ enum DiskSpaceAnalyzerService {
         mtime: Date?
     ) -> DiskCleanupSuggestion? {
         let MB: Int64 = 1_048_576
-        guard sizeBytes >= 12 * MB else { return nil }
+        guard sizeBytes >= 2 * MB else { return nil }
         guard !isProtectedFromCleanup(path) else { return nil }
 
         let home = NSHomeDirectory()
@@ -742,11 +921,12 @@ enum DiskSpaceAnalyzerService {
             return DiskCleanupSuggestion(
                 id: path,
                 path: path,
-                title: "Xcode DerivedData",
+                title: "Bộ nhớ nháp Xcode (DerivedData)",
                 sizeBytes: sizeBytes,
                 safety: .safeRecreate,
                 ruleKind: .developerBuild,
-                reason: "Bộ nhớ đệm biên dịch & chỉ mục Xcode — hoàn toàn tự tạo lại khi mở dự án",
+                reason: "File nháp sinh ra khi chạy Xcode — chiếm rất nhiều bộ nhớ nhưng không chứa mã nguồn.",
+                impactIfDeleted: "Xóa hoàn toàn an toàn — Xcode sẽ tự tạo lại khi bạn mở dự án.",
                 lastModified: mtime,
                 isDirectory: true,
                 requiresAdmin: requiresAdmin
@@ -760,11 +940,12 @@ enum DiskSpaceAnalyzerService {
             return DiskCleanupSuggestion(
                 id: path,
                 path: path,
-                title: "Xcode \(name)",
+                title: "Dữ liệu thiết bị cũ Xcode (\(name))",
                 sizeBytes: sizeBytes,
                 safety: .safeRecreate,
                 ruleKind: .developerBuild,
-                reason: "Biểu tượng gỡ lỗi thiết bị cũ — tự nạp lại nếu cắm thiết bị vào Xcode",
+                reason: "Dữ liệu gỡ lỗi của các phiên bản iOS cũ từng cắm vào máy.",
+                impactIfDeleted: "Xóa hoàn toàn an toàn — Tự nạp lại nếu bạn cắm thiết bị vào Xcode.",
                 lastModified: mtime,
                 isDirectory: true,
                 requiresAdmin: requiresAdmin
@@ -775,11 +956,12 @@ enum DiskSpaceAnalyzerService {
             return DiskCleanupSuggestion(
                 id: path,
                 path: path,
-                title: "CoreSimulator Caches",
+                title: "Bộ nhớ tạm máy ảo iPhone (CoreSimulator Caches)",
                 sizeBytes: sizeBytes,
                 safety: .safeRecreate,
                 ruleKind: .developerBuild,
-                reason: "Bộ nhớ đệm tạm thời của trình giả lập iOS Simulator",
+                reason: "Bộ nhớ đệm tạm thời của trình giả lập iOS Simulator.",
+                impactIfDeleted: "Xóa hoàn toàn an toàn — Không làm mất ứng dụng hay mã nguồn.",
                 lastModified: mtime,
                 isDirectory: true,
                 requiresAdmin: requiresAdmin
@@ -790,11 +972,12 @@ enum DiskSpaceAnalyzerService {
             return DiskCleanupSuggestion(
                 id: path,
                 path: path,
-                title: "Xcode Archives",
+                title: "Bản đóng gói Xcode cũ (Archives)",
                 sizeBytes: sizeBytes,
                 safety: .reviewRecommended,
                 ruleKind: .developerBuild,
-                reason: "Các bản đóng gói phát hành cũ của Xcode — kiểm tra trước nếu còn cần dSYM/IPA",
+                reason: "Các bản đóng gói phát hành cũ của Xcode.",
+                impactIfDeleted: "Có thể xóa nếu bạn không còn cần kiểm tra các bản phát hành cũ này.",
                 lastModified: mtime,
                 isDirectory: true,
                 requiresAdmin: requiresAdmin
@@ -805,11 +988,12 @@ enum DiskSpaceAnalyzerService {
             return DiskCleanupSuggestion(
                 id: path,
                 path: path,
-                title: "Máy ảo iOS Simulator (Devices)",
+                title: "Máy ảo iPhone / iPad thử nghiệm (Simulator Devices)",
                 sizeBytes: sizeBytes,
                 safety: .reviewRecommended,
                 ruleKind: .iosBackupsAndVMs,
-                reason: "Ổ đĩa các máy ảo iOS Simulator — chỉ dọn nếu không cần dữ liệu thử nghiệm hiện tại",
+                reason: "Ổ đĩa các máy ảo iOS Simulator dùng để chạy thử ứng dụng.",
+                impactIfDeleted: "Chỉ dọn nếu bạn không cần giữ dữ liệu đang thử nghiệm bên trong máy ảo iOS.",
                 lastModified: mtime,
                 isDirectory: true,
                 requiresAdmin: requiresAdmin
@@ -818,20 +1002,20 @@ enum DiskSpaceAnalyzerService {
 
         // 2. Package Manager Caches (Homebrew, npm, pip, uv, Yarn, Cargo, Gradle, HuggingFace, Playwright)
         let knownPkgCaches: [(exactPath: String, label: String, detail: String)] = [
-            ("\(home)/.npm/_cacache", "Bộ đệm gói npm (_cacache)", "Gói tải về của Node.js npm — tự tải lại khi cần"),
-            ("\(home)/.cache/pip", "Bộ đệm Python pip", "Gói wheel/http lưu đệm của pip — tự tải lại khi cài thư viện"),
-            ("\(home)/Library/Caches/pip", "Bộ đệm Python pip (Library)", "Gói wheel/http lưu đệm của pip — tự tải lại khi cài thư viện"),
-            ("\(home)/.cache/uv", "Bộ đệm Python uv", "Kho đệm gói Python uv — an toàn để giải phóng"),
-            ("\(home)/Library/Caches/uv", "Bộ đệm Python uv (Library)", "Kho đệm gói Python uv — an toàn để giải phóng"),
-            ("\(home)/Library/Caches/Homebrew", "Bộ cài lưu đệm Homebrew", "Các gói công thức đã tải về của Homebrew (tương đương brew cleanup)"),
-            ("\(home)/.cache/yarn", "Bộ đệm Yarn", "Gói lưu đệm của trình quản lý Yarn"),
-            ("\(home)/Library/Caches/Yarn", "Bộ đệm Yarn (Library)", "Gói lưu đệm của trình quản lý Yarn"),
-            ("\(home)/Library/pnpm/store", "Kho lưu đệm pnpm store", "Các gói Node.js lưu đệm của pnpm — tự tải lại khi chạy pnpm install"),
-            ("\(home)/.gradle/caches", "Bộ đệm Gradle Caches", "Bộ đệm biên dịch và thư viện Android / Java Gradle"),
-            ("\(home)/.cargo/registry/cache", "Bộ đệm Rust Cargo", "Các gói crate nén lưu đệm của Rust Cargo"),
-            ("\(home)/Library/Caches/CocoaPods", "Bộ đệm CocoaPods", "Kho lưu đệm Podspec & thư viện CocoaPods"),
-            ("\(home)/Library/Caches/org.swift.swiftpm", "Bộ đệm Swift Package Manager", "Kho lưu đệm các gói mã nguồn SwiftPM"),
-            ("\(home)/.cache/huggingface", "Bộ đệm mô hình HuggingFace", "Trọng số mô hình & dataset tải về trong ~/.cache/huggingface")
+            ("\(home)/.npm/_cacache", "Bộ cài tạm của Node.js (npm cache)", "Các tệp thư viện tải về tạm thời — tự tải lại khi cần"),
+            ("\(home)/.cache/pip", "Bộ cài tạm của Python (pip cache)", "Các gói cài đặt lưu tạm của Python — xóa không làm hỏng Python"),
+            ("\(home)/Library/Caches/pip", "Bộ cài tạm của Python (Library pip)", "Các gói cài đặt lưu tạm của Python — xóa không làm hỏng Python"),
+            ("\(home)/.cache/uv", "Bộ cài tạm của Python uv", "Kho tệp tải tạm của công cụ Python uv — hoàn toàn an toàn để dọn"),
+            ("\(home)/Library/Caches/uv", "Bộ cài tạm của Python uv (Library)", "Kho tệp tải tạm của công cụ Python uv — hoàn toàn an toàn để dọn"),
+            ("\(home)/Library/Caches/Homebrew", "Gói tải về cũ của Homebrew", "Các bộ cài phần mềm đã tải xong của Homebrew — không ảnh hưởng phần mềm đang chạy"),
+            ("\(home)/.cache/yarn", "Bộ cài tạm của Yarn", "Gói lưu đệm của trình quản lý Yarn — tự tải lại khi cần"),
+            ("\(home)/Library/Caches/Yarn", "Bộ cài tạm của Yarn (Library)", "Gói lưu đệm của trình quản lý Yarn — tự tải lại khi cần"),
+            ("\(home)/Library/pnpm/store", "Kho lưu đệm pnpm store", "Các gói Node.js lưu đệm của pnpm — tự tải lại khi cần"),
+            ("\(home)/.gradle/caches", "Bộ đệm biên dịch Gradle", "Bộ đệm biên dịch Android / Java Gradle — tự tạo lại khi cần"),
+            ("\(home)/.cargo/registry/cache", "Bộ đệm thư viện Rust Cargo", "Các gói thư viện tải tạm của Rust Cargo"),
+            ("\(home)/Library/Caches/CocoaPods", "Bộ đệm thư viện CocoaPods", "Kho lưu đệm thư viện CocoaPods — tự tải lại khi cần"),
+            ("\(home)/Library/Caches/org.swift.swiftpm", "Bộ đệm gói Swift (SwiftPM)", "Kho lưu đệm các gói thư viện Swift — tự tải lại khi build"),
+            ("\(home)/.cache/huggingface", "Mô hình AI tải về (HuggingFace Cache)", "Trọng số mô hình AI dung lượng lớn lưu trong ~/.cache/huggingface")
         ]
 
         for entry in knownPkgCaches where path == entry.exactPath && sizeBytes >= 25 * MB {
@@ -844,6 +1028,9 @@ enum DiskSpaceAnalyzerService {
                 safety: safety,
                 ruleKind: .packageCache,
                 reason: entry.detail,
+                impactIfDeleted: safety == .safeRecreate
+                    ? "Xóa hoàn toàn an toàn — Các phần mềm đã cài vẫn hoạt động bình thường."
+                    : "Nếu xóa, phần mềm AI sẽ cần tải lại mô hình từ mạng khi bạn chạy lại.",
                 lastModified: mtime,
                 isDirectory: true,
                 requiresAdmin: requiresAdmin
@@ -851,18 +1038,19 @@ enum DiskSpaceAnalyzerService {
         }
 
         // 3. Direct children of ~/Library/Caches or /Library/Caches
-        if (parentPath == "\(home)/Library/Caches" || parentPath == "/Library/Caches"), sizeBytes >= 25 * MB {
+        if (parentPath == "\(home)/Library/Caches" || parentPath == "/Library/Caches"), sizeBytes >= 20 * MB {
             if protectedAppleCacheTokens.contains(where: { lowerName.contains($0) }) || lowerName.hasPrefix("com.apple.") {
                 return nil
             }
             return DiskCleanupSuggestion(
                 id: path,
                 path: path,
-                title: "Cache: \(name)",
+                title: "Bộ nhớ tạm: \(name)",
                 sizeBytes: sizeBytes,
                 safety: .safeRecreate,
                 ruleKind: .appCaches,
-                reason: "Bộ nhớ đệm ứng dụng — tự động tạo lại khi sử dụng, không làm mất dữ liệu hay tài khoản",
+                reason: "File hình ảnh & dữ liệu lưu tạm để tăng tốc ứng dụng.",
+                impactIfDeleted: "Xóa hoàn toàn an toàn — Không làm mất tài khoản đăng nhập, cài đặt hay tài liệu của bạn.",
                 lastModified: mtime,
                 isDirectory: true,
                 requiresAdmin: requiresAdmin
@@ -870,15 +1058,16 @@ enum DiskSpaceAnalyzerService {
         }
 
         // 4. Direct children of ~/Library/Logs or /Library/Logs
-        if (parentPath == "\(home)/Library/Logs" || parentPath == "/Library/Logs"), sizeBytes >= 12 * MB {
+        if (parentPath == "\(home)/Library/Logs" || parentPath == "/Library/Logs"), sizeBytes >= 10 * MB {
             return DiskCleanupSuggestion(
                 id: path,
                 path: path,
-                title: "Nhật ký: \(name)",
+                title: "Nhật ký hệ thống cũ: \(name)",
                 sizeBytes: sizeBytes,
                 safety: .safeRecreate,
                 ruleKind: .logsAndCrash,
-                reason: "Tệp ghi nhật ký hoạt động & báo cáo lỗi cũ — an toàn để xóa",
+                reason: "Tệp văn bản ghi lịch sử hoạt động & báo cáo lỗi cũ của phần mềm.",
+                impactIfDeleted: "Xóa hoàn toàn an toàn — Giải phóng bộ nhớ ngay lập tức.",
                 lastModified: mtime,
                 isDirectory: true,
                 requiresAdmin: requiresAdmin
@@ -890,11 +1079,12 @@ enum DiskSpaceAnalyzerService {
             return DiskCleanupSuggestion(
                 id: path,
                 path: path,
-                title: "Bản sao lưu iPhone / iPad (MobileSync)",
+                title: "Bản sao lưu iPhone / iPad cũ trên máy",
                 sizeBytes: sizeBytes,
                 safety: .reviewRecommended,
                 ruleKind: .iosBackupsAndVMs,
-                reason: "Bản sao lưu thiết bị iOS cục bộ — chỉ xóa nếu bạn đã sao lưu iCloud hoặc không còn cần bản cũ",
+                reason: "Bản sao lưu thiết bị iOS lưu trên ổ cứng máy Mac.",
+                impactIfDeleted: "Chỉ xóa nếu điện thoại của bạn đã sao lưu lên iCloud hoặc không cần bản sao lưu cũ này.",
                 lastModified: mtime,
                 isDirectory: true,
                 requiresAdmin: requiresAdmin
@@ -906,31 +1096,51 @@ enum DiskSpaceAnalyzerService {
             return DiskCleanupSuggestion(
                 id: path,
                 path: path,
-                title: lowerName.contains("orbstack") ? "Dữ liệu máy ảo OrbStack" : "Dữ liệu ổ đĩa ảo Docker Desktop",
+                title: lowerName.contains("orbstack") ? "Dữ liệu máy ảo OrbStack" : "Dữ liệu máy ảo Docker Desktop",
                 sizeBytes: sizeBytes,
                 safety: .reviewRecommended,
                 ruleKind: .iosBackupsAndVMs,
-                reason: "Chứa Docker Images, Volumes & Containers — kiểm tra kỹ trước khi xóa toàn bộ",
+                reason: "Chứa các máy ảo & container của Docker / OrbStack.",
+                impactIfDeleted: "Kiểm tra kỹ trước khi xóa — Xóa mục này sẽ xóa toàn bộ container bên trong.",
                 lastModified: mtime,
                 isDirectory: true,
                 requiresAdmin: requiresAdmin
             )
         }
 
-        // 6. Project Build / Dependency Artifacts outside System & Library folders
+        // 6. Project Build / Distribution / Dependency Artifacts outside System & Library folders
         let isOutsideLibrary = !path.contains("/Library/") && !path.hasPrefix("/System") && !path.hasPrefix("/Applications")
         if isOutsideLibrary {
             let projectName = (parentPath as NSString).lastPathComponent
             let pureBuildDirs: Set<String> = [".build", ".next", ".nuxt", ".turbo", ".parcel-cache", ".pytest_cache", "__pycache__", "DerivedData"]
-            if pureBuildDirs.contains(name), sizeBytes >= 30 * MB {
+            if pureBuildDirs.contains(name), sizeBytes >= 2 * MB {
                 return DiskCleanupSuggestion(
                     id: path,
                     path: path,
-                    title: "\(name) — dự án \(projectName)",
+                    title: "File nháp đóng gói (\(projectName)/\(name))",
                     sizeBytes: sizeBytes,
                     safety: .safeRecreate,
                     ruleKind: .developerBuild,
-                    reason: "Thư mục biên dịch tạm của dự án '\(projectName)' — tự tạo lại khi chạy lệnh build",
+                    reason: "Tệp trung gian sinh ra tự động khi biên dịch ứng dụng '\(projectName)' — chiếm nhiều dung lượng nhưng không chứa mã nguồn.",
+                    impactIfDeleted: "Xóa hoàn toàn an toàn — Mã nguồn, tài liệu và ứng dụng đã cài đều giữ nguyên 100%.",
+                    lastModified: mtime,
+                    isDirectory: true,
+                    requiresAdmin: requiresAdmin
+                )
+            }
+
+            // Distribution / release output folders (e.g. BuildApp/dist, AppSweep/dist, BarFlow/dist)
+            let distDirs: Set<String> = ["dist", "release", "releases", "artifacts", "build-output"]
+            if distDirs.contains(lowerName), sizeBytes >= 2 * MB, directoryHasProjectOrBuildMarkers(parentPath) || projectName.lowercased().contains("build") {
+                return DiskCleanupSuggestion(
+                    id: path,
+                    path: path,
+                    title: "Thư mục xuất bộ cài (\(projectName)/\(name))",
+                    sizeBytes: sizeBytes,
+                    safety: .safeRecreate,
+                    ruleKind: .developerBuild,
+                    reason: "Chứa các tệp bộ cài (.dmg, .zip, .app) đã đóng gói xong trong thư mục '\(projectName)'.",
+                    impactIfDeleted: "Xóa hoàn toàn an toàn — Chỉ dọn các tệp bộ cài xuất ra, không ảnh hưởng mã nguồn hay ứng dụng chính.",
                     lastModified: mtime,
                     isDirectory: true,
                     requiresAdmin: requiresAdmin
@@ -938,33 +1148,35 @@ enum DiskSpaceAnalyzerService {
             }
 
             if (name == "node_modules" && !path.dropLast(name.count).contains("/node_modules/")) || name == "Pods",
-               sizeBytes >= 75 * MB {
+               sizeBytes >= 40 * MB {
                 return DiskCleanupSuggestion(
                     id: path,
                     path: path,
-                    title: "\(name) — dự án \(projectName)",
+                    title: "Thư viện tải về (\(projectName)/\(name))",
                     sizeBytes: sizeBytes,
                     safety: .reviewRecommended,
                     ruleKind: .developerBuild,
-                    reason: "Thư viện phụ thuộc của dự án '\(projectName)' — có thể cài lại bất cứ lúc nào bằng npm/pnpm/pod install",
+                    reason: "Thư viện phụ thuộc tải từ mạng của dự án '\(projectName)'.",
+                    impactIfDeleted: "Không làm mất mã nguồn của bạn — Nếu cần làm việc lại với dự án này, chỉ cần chạy lệnh cài lại thư viện.",
                     lastModified: mtime,
                     isDirectory: true,
                     requiresAdmin: requiresAdmin
                 )
             }
 
-            if name == "target", sizeBytes >= 120 * MB {
+            if name == "target", sizeBytes >= 50 * MB {
                 let cargoToml = (parentPath as NSString).appendingPathComponent("Cargo.toml")
                 let pomXml = (parentPath as NSString).appendingPathComponent("pom.xml")
                 if FileManager.default.fileExists(atPath: cargoToml) || FileManager.default.fileExists(atPath: pomXml) {
                     return DiskCleanupSuggestion(
                         id: path,
                         path: path,
-                        title: "target — dự án \(projectName)",
+                        title: "File nháp đóng gói (\(projectName)/target)",
                         sizeBytes: sizeBytes,
                         safety: .safeRecreate,
                         ruleKind: .developerBuild,
-                        reason: "Kết quả biên dịch Rust/Maven của dự án '\(projectName)' — tự tạo lại khi cargo/mvn build",
+                        reason: "Tệp trung gian sinh ra khi biên dịch dự án '\(projectName)'.",
+                        impactIfDeleted: "Xóa hoàn toàn an toàn — Mã nguồn gốc được giữ nguyên 100%.",
                         lastModified: mtime,
                         isDirectory: true,
                         requiresAdmin: requiresAdmin
@@ -983,65 +1195,92 @@ enum DiskSpaceAnalyzerService {
         mtime: Date?
     ) -> DiskCleanupSuggestion? {
         let MB: Int64 = 1_048_576
-        guard sizeBytes >= 25 * MB else { return nil }
+        guard sizeBytes >= 3 * MB else { return nil }
         guard !isProtectedFromCleanup(path) else { return nil }
 
         let home = NSHomeDirectory()
         if path.hasPrefix(home + "/.Trash/") { return nil }
 
         let ext = (name as NSString).pathExtension.lowercased()
+        let parentPath = (path as NSString).deletingLastPathComponent
+        let parentName = (parentPath as NSString).lastPathComponent
         let inDownloads = path.hasPrefix(home + "/Downloads/")
         let requiresAdmin = DiskSizeCalculator.requiresAdminToModify(path: path)
 
-        // 1. Disk images & installer packages (.dmg, .pkg, .iso, .ipsw) in Downloads or anywhere outside Library
+        // 1. Disk images & installer packages (.dmg, .pkg, .iso, .ipsw) in Downloads or build folders
         let installerExts: Set<String> = ["dmg", "pkg", "iso", "ipsw", "xip"]
-        if installerExts.contains(ext), (inDownloads || !path.contains("/Library/")), sizeBytes >= 25 * MB {
+        if installerExts.contains(ext), (inDownloads || !path.contains("/Library/")), sizeBytes >= 3 * MB {
+            let isInBuildOrDist = parentName.lowercased() == "dist" || parentName.lowercased().contains("build") || directoryHasProjectOrBuildMarkers(parentPath)
             return DiskCleanupSuggestion(
                 id: path,
                 path: path,
-                title: name,
+                title: isInBuildOrDist ? "Bộ cài đóng gói: \(name)" : "Bộ cài đặt: \(name)",
                 sizeBytes: sizeBytes,
-                safety: .reviewRecommended,
+                safety: isInBuildOrDist ? .safeRecreate : .reviewRecommended,
                 ruleKind: .oldInstallers,
                 reason: inDownloads
-                    ? "Bộ cài đặt trong thư mục Tải về — có thể dọn nếu bạn đã cài đặt ứng dụng xong"
-                    : "Tệp ảnh đĩa / bộ cài đặt dung lượng lớn",
+                    ? "Tệp bộ cài đặt ứng dụng trong thư mục Tải về (Downloads)."
+                    : "Tệp bộ cài đặt (.dmg / .pkg) nằm trong thư mục '\(parentName)'.",
+                impactIfDeleted: "Xóa bộ cài này hoàn toàn không làm mất ứng dụng bạn đã cài đặt trong máy.",
                 lastModified: mtime,
                 isDirectory: false,
                 requiresAdmin: requiresAdmin
             )
         }
 
-        // 2. Large compressed archives in ~/Downloads (>= 80 MB & older than 7 days)
+        // 2. Compressed archives (.zip, .tar.gz) inside dist/build folders or large old archives in ~/Downloads
         let archiveExts: Set<String> = ["zip", "gz", "tgz", "bz2", "xz", "7z", "rar", "tar"]
-        if inDownloads && archiveExts.contains(ext) && sizeBytes >= 80 * MB {
-            let ageDays = mtime.map { Calendar.current.dateComponents([.day], from: $0, to: Date()).day ?? 0 } ?? 0
-            if ageDays >= 7 {
+        if archiveExts.contains(ext) {
+            let lowerName = name.lowercased()
+            let isInDistOrRelease = ["dist", "release", "releases", "artifacts"].contains(parentName.lowercased())
+                || (lowerName.contains("-macos.zip") || lowerName.contains("installer"))
+            if isInDistOrRelease && !path.contains("/Library/") && sizeBytes >= 3 * MB {
                 return DiskCleanupSuggestion(
                     id: path,
                     path: path,
-                    title: name,
+                    title: "Gói nén phát hành: \(name)",
                     sizeBytes: sizeBytes,
-                    safety: .reviewRecommended,
+                    safety: .safeRecreate,
                     ruleKind: .oldInstallers,
-                    reason: "Gói nén dung lượng lớn tải về từ \(ageDays) ngày trước — kiểm tra nếu đã giải nén xong",
+                    reason: "Bản nén .zip tạo ra khi đóng gói phần mềm trong '\(parentName)'.",
+                    impactIfDeleted: "Xóa hoàn toàn an toàn — Không làm mất mã nguồn hay ứng dụng chính.",
                     lastModified: mtime,
                     isDirectory: false,
                     requiresAdmin: requiresAdmin
                 )
             }
+
+            if inDownloads && sizeBytes >= 50 * MB {
+                let ageDays = mtime.map { Calendar.current.dateComponents([.day], from: $0, to: Date()).day ?? 0 } ?? 0
+                if ageDays >= 7 {
+                    return DiskCleanupSuggestion(
+                        id: path,
+                        path: path,
+                        title: "File nén cũ: \(name)",
+                        sizeBytes: sizeBytes,
+                        safety: .reviewRecommended,
+                        ruleKind: .oldInstallers,
+                        reason: "Tệp nén tải về từ \(ageDays) ngày trước trong thư mục Downloads.",
+                        impactIfDeleted: "Nếu bạn đã giải nén tệp này rồi, xóa file .zip gốc sẽ giúp tiết kiệm gấp đôi dung lượng.",
+                        lastModified: mtime,
+                        isDirectory: false,
+                        requiresAdmin: requiresAdmin
+                    )
+                }
+            }
         }
 
         // 3. Large standalone log files anywhere
-        if (ext == "log" || ext == "out" || ext == "err"), sizeBytes >= 30 * MB {
+        if (ext == "log" || ext == "out" || ext == "err"), sizeBytes >= 15 * MB {
             return DiskCleanupSuggestion(
                 id: path,
                 path: path,
-                title: name,
+                title: "Tệp nhật ký: \(name)",
                 sizeBytes: sizeBytes,
                 safety: .safeRecreate,
                 ruleKind: .logsAndCrash,
-                reason: "Tệp ghi nhật ký văn bản phình to — an toàn để dọn dẹp",
+                reason: "Tệp văn bản ghi nhật ký hoạt động phình to.",
+                impactIfDeleted: "Xóa hoàn toàn an toàn — Không ảnh hưởng dữ liệu cá nhân.",
                 lastModified: mtime,
                 isDirectory: false,
                 requiresAdmin: requiresAdmin
@@ -1057,7 +1296,8 @@ enum DiskSpaceAnalyzerService {
                 sizeBytes: sizeBytes,
                 safety: .reviewRecommended,
                 ruleKind: .largeFiles,
-                reason: "Tệp đơn lẻ chiếm ≥ 500 MB — kiểm tra xem bạn còn cần giữ tệp này trên ổ đĩa không",
+                reason: "Tệp dung lượng rất lớn (trên 500 MB) nằm trong '\(parentName)'.",
+                impactIfDeleted: "Hãy kiểm tra xem bạn còn cần tệp này không trước khi chuyển vào Thùng rác.",
                 lastModified: mtime,
                 isDirectory: false,
                 requiresAdmin: requiresAdmin

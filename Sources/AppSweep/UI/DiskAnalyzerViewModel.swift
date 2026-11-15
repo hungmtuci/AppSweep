@@ -35,13 +35,18 @@ final class DiskAnalyzerViewModel: ObservableObject {
     @Published var recommendationSafetyFilter: CleanupSafetyFilter = .all {
         didSet { rebuildFilteredRecommendations() }
     }
+    @Published var selectedFolderFilterPath: String? = nil {
+        didSet { rebuildFilteredRecommendations() }
+    }
     @Published var recommendationSearchQuery: String = "" {
         didSet { rebuildFilteredRecommendations() }
     }
     @Published private(set) var filteredRecommendations: [DiskCleanupSuggestion] = []
     @Published private(set) var groupedRecommendations: [(kind: CleanupRuleKind, items: [DiskCleanupSuggestion], totalBytes: Int64)] = []
+    @Published private(set) var folderScopeOptions: [FolderCleanupScopeOption] = []
     @Published private(set) var totalRecommendedBytes: Int64 = 0
     @Published private(set) var safeRecommendedBytes: Int64 = 0
+    @Published private(set) var appsAndInstallersBytes: Int64 = 0
     @Published private(set) var reviewRecommendedBytes: Int64 = 0
     @Published private(set) var cleanablePathPrefixes: [String] = []
     private var suggestionByPath: [String: DiskCleanupSuggestion] = [:]
@@ -144,6 +149,7 @@ final class DiskAnalyzerViewModel: ObservableObject {
             self.highlightedNodeID = snapshot.rootNode.children.first?.id
 
             self.recommendations = snapshot.recommendations
+            self.selectedFolderFilterPath = nil
             self.selectedCleanupPaths.removeAll()
             self.manualSelectedNodesByPath.removeAll()
             self.rebuildRecommendationCaches()
@@ -220,7 +226,7 @@ final class DiskAnalyzerViewModel: ObservableObject {
         let targetPath = node.path
 
         drillDownTask = Task {
-            let expanded = await DiskSpaceAnalyzerService.scanSubfolderOnDemand(at: targetPath, maxDepth: 3)
+            let (expanded, newSuggestions) = await DiskSpaceAnalyzerService.scanSubfolderOnDemand(at: targetPath, maxDepth: 3)
             guard !Task.isCancelled else { return }
             self.isDrillingDown = false
 
@@ -229,6 +235,17 @@ final class DiskAnalyzerViewModel: ObservableObject {
                 Self.replaceSubtree(in: &root, targetPath: targetPath, with: expanded)
                 self.rootNode = root
                 self.refreshBreadcrumbsFromRoot()
+            }
+            if !newSuggestions.isEmpty {
+                var merged = self.recommendations
+                var existingPaths = Set(merged.map(\.path))
+                for s in newSuggestions where !existingPaths.contains(s.path) {
+                    existingPaths.insert(s.path)
+                    merged.append(s)
+                }
+                merged.sort { $0.sizeBytes > $1.sizeBytes }
+                self.recommendations = merged
+                self.rebuildRecommendationCaches()
             }
             self.breadcrumbNodes.append(expanded)
             self.maxVisibleTiles = 24
@@ -307,7 +324,87 @@ final class DiskAnalyzerViewModel: ObservableObject {
         return cleanablePathPrefixes.contains { $0.hasPrefix(prefix) }
     }
 
+    /// Returns all cleanup suggestions located at or inside `dirPath`.
+    func recommendations(under dirPath: String) -> [DiskCleanupSuggestion] {
+        let prefix = dirPath.hasSuffix("/") ? dirPath : (dirPath + "/")
+        return recommendations.filter { $0.path == dirPath || $0.path.hasPrefix(prefix) }
+    }
+
+    /// Returns cleanable byte sum, item count, and selected count for a folder path.
+    func cleanableSummary(under dirPath: String) -> (bytes: Int64, count: Int, selectedCount: Int) {
+        let items = recommendations(under: dirPath)
+        guard !items.isEmpty else { return (0, 0, 0) }
+        var bytes: Int64 = 0
+        var sel = 0
+        for item in items {
+            bytes += item.sizeBytes
+            if selectedCleanupPaths.contains(item.path) {
+                sel += 1
+            }
+        }
+        return (bytes, items.count, sel)
+    }
+
+    /// Groups all cleanup recommendations inside `dirPath` by category (`CleanupRuleKind`) for per-folder category toggles.
+    func ruleBreakdown(forDirectory dirPath: String) -> [FolderRuleBreakdownSlice] {
+        let items = recommendations(under: dirPath)
+        guard !items.isEmpty else { return [] }
+        var grouped: [CleanupRuleKind: [DiskCleanupSuggestion]] = [:]
+        for item in items {
+            grouped[item.ruleKind, default: []].append(item)
+        }
+        return grouped.keys
+            .sorted { $0.sortOrder < $1.sortOrder }
+            .compactMap { kind in
+                guard let list = grouped[kind], !list.isEmpty else { return nil }
+                let bytes = list.reduce(Int64(0)) { $0 + $1.sizeBytes }
+                let sel = list.filter { selectedCleanupPaths.contains($0.path) }.count
+                return FolderRuleBreakdownSlice(
+                    kind: kind,
+                    totalBytes: bytes,
+                    itemCount: list.count,
+                    selectedCount: sel
+                )
+            }
+    }
+
+    /// Toggles selection of a specific `CleanupRuleKind` inside `dirPath`.
+    func toggleRuleSlice(_ kind: CleanupRuleKind, inDirectory dirPath: String) {
+        let matching = recommendations(under: dirPath).filter { $0.ruleKind == kind }
+        guard !matching.isEmpty else { return }
+        let allSelected = matching.allSatisfy { selectedCleanupPaths.contains($0.path) }
+        for item in matching {
+            if allSelected {
+                selectedCleanupPaths.remove(item.path)
+            } else {
+                selectedCleanupPaths.insert(item.path)
+            }
+        }
+    }
+
+    /// Toggles all cleanable suggestions inside `dirPath` (leaving source code / user documents untouched).
+    func toggleAllCleanable(under dirPath: String) {
+        let matching = recommendations(under: dirPath)
+        guard !matching.isEmpty else { return }
+        let allSelected = matching.allSatisfy { selectedCleanupPaths.contains($0.path) }
+        for item in matching {
+            if allSelected {
+                selectedCleanupPaths.remove(item.path)
+            } else {
+                selectedCleanupPaths.insert(item.path)
+            }
+        }
+    }
+
+    /// Opens the Cleanup Advisor tab filtered specifically to `dirPath`.
+    func openRecommendationsForFolder(_ dirPath: String) {
+        selectedFolderFilterPath = dirPath
+        recommendationSafetyFilter = .all
+        activeMode = .recommendations
+    }
+
     private func rebuildCurrentExplorerChildren() {
+        rebuildFolderScopeOptions()
         guard let current = currentNode else {
             visibleExplorerChildren = []
             return
@@ -327,6 +424,7 @@ final class DiskAnalyzerViewModel: ObservableObject {
         dict.reserveCapacity(recommendations.count)
         var total: Int64 = 0
         var safe: Int64 = 0
+        var appsInstallers: Int64 = 0
         var review: Int64 = 0
 
         for rec in recommendations {
@@ -337,25 +435,120 @@ final class DiskAnalyzerViewModel: ObservableObject {
             } else {
                 review += rec.sizeBytes
             }
+            if rec.ruleKind == .builtAndDuplicateApps || rec.ruleKind == .oldInstallers {
+                appsInstallers += rec.sizeBytes
+            }
         }
 
         suggestionByPath = dict
         cleanablePathPrefixes = recommendations.map(\.path)
         totalRecommendedBytes = total
         safeRecommendedBytes = safe
+        appsAndInstallersBytes = appsInstallers
         reviewRecommendedBytes = review
+        rebuildFolderScopeOptions()
         rebuildFilteredRecommendations()
+    }
+
+    private func rebuildFolderScopeOptions() {
+        guard !recommendations.isEmpty else {
+            folderScopeOptions = []
+            return
+        }
+        let home = NSHomeDirectory()
+        let rootPath = rootNode?.path ?? home
+        let excludedContainers: Set<String> = ["/", "/Users", home, rootPath, "\(home)/Library", "\(home)/Documents"]
+
+        var candidateDirs = Set<String>()
+        for rec in recommendations {
+            let parent = rec.parentFolderPath
+            if !excludedContainers.contains(parent) {
+                candidateDirs.insert(parent)
+            }
+            let grandParent = (parent as NSString).deletingLastPathComponent
+            if !excludedContainers.contains(grandParent) && !grandParent.isEmpty {
+                candidateDirs.insert(grandParent)
+            }
+        }
+
+        if let current = currentNode, breadcrumbNodes.count > 1 {
+            candidateDirs.insert(current.path)
+        }
+
+        var scored: [(path: String, bytes: Int64, count: Int)] = []
+        for dir in candidateDirs {
+            let prefix = dir.hasSuffix("/") ? dir : (dir + "/")
+            var bytes: Int64 = 0
+            var count = 0
+            for rec in recommendations where rec.path == dir || rec.path.hasPrefix(prefix) {
+                bytes += rec.sizeBytes
+                count += 1
+            }
+            if count > 0 {
+                scored.append((path: dir, bytes: bytes, count: count))
+            }
+        }
+
+        // Remove redundant child folders whose parent folder is already a workspace container with more items (unless child is currentNode)
+        let currentPath = currentNode?.path
+        let pruned = scored.filter { entry in
+            if entry.path == currentPath { return true }
+            let parent = (entry.path as NSString).deletingLastPathComponent
+            if let parentEntry = scored.first(where: { $0.path == parent }) {
+                // If parent aggregates multiple subfolders (like BuildApp aggregating AppSweep, WebBox, DriveBar), prefer parent in top bar
+                if parentEntry.count > entry.count && entry.count <= 2 {
+                    return false
+                }
+                // If parent has exact same count, prefer the more specific child folder
+                if parentEntry.count == entry.count {
+                    return true
+                }
+            }
+            // If a child has exact same count as this entry, skip this ancestor
+            if scored.contains(where: { $0.path != entry.path && $0.path.hasPrefix(entry.path + "/") && $0.count == entry.count }) {
+                return false
+            }
+            return true
+        }
+
+        let sorted = pruned.sorted { lhs, rhs in
+            if lhs.path == currentPath && breadcrumbNodes.count > 1 { return true }
+            if rhs.path == currentPath && breadcrumbNodes.count > 1 { return false }
+            if lhs.bytes != rhs.bytes { return lhs.bytes > rhs.bytes }
+            return lhs.count > rhs.count
+        }
+
+        folderScopeOptions = sorted.prefix(8).map { entry in
+            let name = (entry.path as NSString).lastPathComponent
+            let isCurrent = (entry.path == currentPath && breadcrumbNodes.count > 1)
+            return FolderCleanupScopeOption(
+                id: entry.path,
+                folderPath: entry.path,
+                displayName: isCurrent ? "Đang mở: \(name)" : name,
+                reclaimableBytes: entry.bytes,
+                itemCount: entry.count
+            )
+        }
     }
 
     private func rebuildFilteredRecommendations() {
         let q = recommendationSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasQuery = !q.isEmpty
+        let folderScope = selectedFolderFilterPath
+        let folderPrefix = folderScope.map { $0.hasSuffix("/") ? $0 : ($0 + "/") }
 
         let filtered = recommendations.filter { item in
+            if let folderScope, let folderPrefix {
+                if item.path != folderScope && !item.path.hasPrefix(folderPrefix) {
+                    return false
+                }
+            }
             switch recommendationSafetyFilter {
             case .all: break
             case .safeOnly:
                 if item.safety != .safeRecreate { return false }
+            case .appsAndInstallers:
+                if item.ruleKind != .builtAndDuplicateApps && item.ruleKind != .oldInstallers { return false }
             case .reviewOnly:
                 if item.safety != .reviewRecommended { return false }
             }
@@ -419,7 +612,15 @@ final class DiskAnalyzerViewModel: ObservableObject {
     }
 
     func selectSafeRecommendations() {
-        for rec in recommendations where rec.safety == .safeRecreate {
+        let pool = selectedFolderFilterPath != nil ? filteredRecommendations : recommendations
+        for rec in pool where rec.safety == .safeRecreate {
+            selectedCleanupPaths.insert(rec.path)
+        }
+    }
+
+    func selectAppsAndInstallersRecommendations() {
+        let pool = selectedFolderFilterPath != nil ? filteredRecommendations : recommendations
+        for rec in pool where rec.ruleKind == .builtAndDuplicateApps || rec.ruleKind == .oldInstallers {
             selectedCleanupPaths.insert(rec.path)
         }
     }
